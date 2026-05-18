@@ -1,0 +1,21 @@
+node_modules
+dist
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Editor directories and files
+.vscode
+.idea
+.DS_Store
+*.sw?
+
+# Vercel
+.vercel

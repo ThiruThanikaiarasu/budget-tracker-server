@@ -1,0 +1,31 @@
+import { Router } from "express";
+import { z } from "zod";
+import { validate } from "../middlewares/validate.js";
+import { authenticate } from "../middlewares/auth.js";
+import {
+  getCategories,
+  createCategory,
+  updateCategory,
+} from "../controllers/categoryController.js";
+
+const createSchema = z.object({
+  name: z.string().min(1),
+  type: z.enum(["income", "expense"]),
+  icon: z.string().optional(),
+});
+
+const updateSchema = z.object({
+  name: z.string().min(1),
+  type: z.enum(["income", "expense"]),
+  icon: z.string().optional(),
+});
+
+const router = Router();
+
+router.use(authenticate);
+
+router.get("/", getCategories);
+router.post("/", validate(createSchema), createCategory);
+router.put("/:id", validate(updateSchema), updateCategory);
+
+export default router;
