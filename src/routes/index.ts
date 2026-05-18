@@ -8,6 +8,7 @@ import dashboardRoutes from "./dashboard.js";
 import friendRoutes from "./friends.js";
 import splitRoutes from "./splits.js";
 import investmentRoutes from "./investments.js";
+import budgetRoutes from "./budgets.js";
 
 const router = Router();
 
@@ -20,5 +21,6 @@ router.use("/dashboard", dashboardRoutes);
 router.use("/friends", friendRoutes);
 router.use("/splits", splitRoutes);
 router.use("/investments", investmentRoutes);
+router.use("/budgets", budgetRoutes);
 
 export default router;
