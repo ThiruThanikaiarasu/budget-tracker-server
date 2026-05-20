@@ -2,7 +2,12 @@ import { Router } from "express";
 import { z } from "zod";
 import { validate } from "../middlewares/validate.js";
 import { authenticate } from "../middlewares/auth.js";
-import { register, login, getMe } from "../controllers/authController.js";
+import {
+  register,
+  login,
+  getMe,
+  updatePreferences,
+} from "../controllers/authController.js";
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -20,5 +25,16 @@ const router = Router();
 router.post("/register", validate(registerSchema), register);
 router.post("/login", validate(loginSchema), login);
 router.get("/me", authenticate, getMe);
+
+const preferencesSchema = z.object({
+  financialMonthStartDay: z.number().int().min(1).max(31),
+});
+
+router.put(
+  "/preferences",
+  authenticate,
+  validate(preferencesSchema),
+  updatePreferences
+);
 
 export default router;

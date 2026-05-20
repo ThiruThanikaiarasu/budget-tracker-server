@@ -2,6 +2,12 @@ import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Budget } from "../models/Budget.js";
 import { Transaction } from "../models/Transaction.js";
+import {
+  getFinancialMonthRange,
+  getCurrentFinancialMonth,
+  getUserStartDay,
+  buildPeriodDays,
+} from "../utils/financialMonth.js";
 
 export async function upsertBudget(
   req: Request,
@@ -50,9 +56,8 @@ export async function getBudget(
   res.status(200).json({ success: true, budget });
 }
 
-function getDaysInMonth(month: string): number {
-  const [year, m] = month.split("-").map(Number);
-  return new Date(year, m, 0).getDate();
+function formatDateStr(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 export async function getMonthlySummary(
@@ -60,11 +65,8 @@ export async function getMonthlySummary(
   res: Response
 ): Promise<void> {
   const month = req.params.month as string;
-  const [year, m] = month.split("-").map(Number);
-  const daysInMonth = getDaysInMonth(month);
-
-  const startDate = new Date(year, m - 1, 1);
-  const endDate = new Date(year, m, 0, 23, 59, 59, 999);
+  const startDay = await getUserStartDay(req.userId!);
+  const { start, end, daysInPeriod } = getFinancialMonthRange(month, startDay);
 
   const budget = await Budget.findOne({ userId: req.userId, month }).populate(
     "categoryBudgets.categoryId",
@@ -76,16 +78,15 @@ export async function getMonthlySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
-        date: { $gte: startDate, $lte: endDate },
+        date: { $gte: start, $lte: end },
       },
     },
     {
       $group: {
-        _id: { $dayOfMonth: "$date" },
+        _id: { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
         total: { $sum: "$amount" },
       },
     },
-    { $sort: { _id: 1 } },
   ]);
 
   const categorySpending = await Transaction.aggregate([
@@ -93,39 +94,44 @@ export async function getMonthlySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
-        date: { $gte: startDate, $lte: endDate },
+        date: { $gte: start, $lte: end },
         categoryId: { $exists: true },
       },
     },
     {
       $group: {
-        _id: { day: { $dayOfMonth: "$date" }, categoryId: "$categoryId" },
+        _id: {
+          date: { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
+          categoryId: "$categoryId",
+        },
         total: { $sum: "$amount" },
       },
     },
   ]);
 
   const dailyLimit = budget?.overallLimit
-    ? Math.round((budget.overallLimit / daysInMonth) * 100) / 100
+    ? Math.round((budget.overallLimit / daysInPeriod) * 100) / 100
     : null;
 
-  const spendingMap: Record<number, number> = {};
+  const spendingMap: Record<string, number> = {};
   for (const entry of dailySpending) {
     spendingMap[entry._id] = entry.total;
   }
 
-  const categorySpendingMap: Record<string, Record<number, number>> = {};
+  const categorySpendingMap: Record<string, number> = {};
   for (const entry of categorySpending) {
     const catId = entry._id.categoryId.toString();
-    if (!categorySpendingMap[catId]) categorySpendingMap[catId] = {};
-    categorySpendingMap[catId][entry._id.day] = entry.total;
+    categorySpendingMap[catId] =
+      (categorySpendingMap[catId] || 0) + entry.total;
   }
 
-  const days = Array.from({ length: daysInMonth }, (_, i) => {
-    const day = i + 1;
-    const spent = spendingMap[day] || 0;
+  const periodDays = buildPeriodDays(start, daysInPeriod);
+
+  const days = periodDays.map((pd, i) => {
+    const spent = spendingMap[pd.date] || 0;
     return {
-      day,
+      day: i + 1,
+      date: pd.date,
       spent,
       dailyLimit,
       isOver: dailyLimit !== null ? spent > dailyLimit : false,
@@ -140,15 +146,14 @@ export async function getMonthlySummary(
   const categorySummary = budget
     ? budget.categoryBudgets.map((cb) => {
         const catId = cb.categoryId.toString();
-        const catSpending = categorySpendingMap[catId] || {};
-        const catTotalSpent = Object.values(catSpending).reduce((s, v) => s + v, 0);
+        const catTotalSpent = categorySpendingMap[catId] || 0;
         const isDaily = cb.frequency === "daily";
         return {
           categoryId: cb.categoryId,
           limit: cb.limit,
           frequency: cb.frequency,
           dailyLimit: isDaily
-            ? Math.round((cb.limit / daysInMonth) * 100) / 100
+            ? Math.round((cb.limit / daysInPeriod) * 100) / 100
             : null,
           totalSpent: catTotalSpent,
         };
@@ -159,7 +164,8 @@ export async function getMonthlySummary(
     success: true,
     summary: {
       month,
-      daysInMonth,
+      daysInPeriod,
+      periodStart: formatDateStr(start),
       overallLimit: budget?.overallLimit || null,
       dailyLimit,
       totalSpent,
@@ -173,13 +179,25 @@ export async function getTodaySummary(
   req: Request,
   res: Response
 ): Promise<void> {
-  const today = new Date();
-  const month = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
-  const daysInMonth = getDaysInMonth(month);
+  const startDay = await getUserStartDay(req.userId!);
+  const month = getCurrentFinancialMonth(startDay);
+  const { start, end, daysInPeriod } = getFinancialMonthRange(month, startDay);
 
-  const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
-  const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const today = new Date();
+  const startOfDay = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate()
+  );
+  const endOfDay = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+    23,
+    59,
+    59,
+    999
+  );
 
   const budget = await Budget.findOne({ userId: req.userId, month }).populate(
     "categoryBudgets.categoryId",
@@ -229,7 +247,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
-        date: { $gte: startOfMonth, $lte: endOfDay },
+        date: { $gte: start, $lte: endOfDay },
         categoryId: { $exists: true },
       },
     },
@@ -243,7 +261,7 @@ export async function getTodaySummary(
 
   const todaySpent = todayExpenses[0]?.total || 0;
   const dailyLimit = budget.overallLimit
-    ? Math.round((budget.overallLimit / daysInMonth) * 100) / 100
+    ? Math.round((budget.overallLimit / daysInPeriod) * 100) / 100
     : null;
 
   const categoryStatus = budget.categoryBudgets.map((cb) => {
@@ -251,10 +269,11 @@ export async function getTodaySummary(
     const isDaily = cb.frequency === "daily";
 
     if (isDaily) {
-      const catDailyLimit = Math.round((cb.limit / daysInMonth) * 100) / 100;
-      const catSpent = todayCategoryExpenses.find(
-        (e) => e._id.toString() === catId
-      )?.total || 0;
+      const catDailyLimit =
+        Math.round((cb.limit / daysInPeriod) * 100) / 100;
+      const catSpent =
+        todayCategoryExpenses.find((e) => e._id.toString() === catId)?.total ||
+        0;
       return {
         categoryId: cb.categoryId,
         frequency: cb.frequency,
@@ -264,9 +283,9 @@ export async function getTodaySummary(
         isOver: catSpent > catDailyLimit,
       };
     } else {
-      const catMonthlySpent = monthlyCategoryExpenses.find(
-        (e) => e._id.toString() === catId
-      )?.total || 0;
+      const catMonthlySpent =
+        monthlyCategoryExpenses.find((e) => e._id.toString() === catId)
+          ?.total || 0;
       return {
         categoryId: cb.categoryId,
         frequency: cb.frequency,

@@ -1,23 +1,27 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Transaction } from "../models/Transaction.js";
+import {
+  getFinancialMonthRange,
+  getCurrentFinancialMonth,
+  getUserStartDay,
+} from "../utils/financialMonth.js";
 
 export async function getSummary(
   req: Request,
   res: Response
 ): Promise<void> {
   const userId = new mongoose.Types.ObjectId(req.userId);
-
-  const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  const startDay = await getUserStartDay(req.userId!);
+  const currentMonth = getCurrentFinancialMonth(startDay);
+  const { start, end } = getFinancialMonthRange(currentMonth, startDay);
 
   const result = await Transaction.aggregate([
     {
       $match: {
         userId,
         type: { $in: ["income", "expense"] },
-        date: { $gte: startOfMonth, $lte: endOfMonth },
+        date: { $gte: start, $lte: end },
       },
     },
     {
@@ -51,30 +55,22 @@ export async function getCategoryBreakdown(
   res: Response
 ): Promise<void> {
   const userId = new mongoose.Types.ObjectId(req.userId);
+  const startDay = await getUserStartDay(req.userId!);
   const monthParam = req.query.month as string | undefined;
 
-  let year: number;
-  let month: number;
+  const month =
+    monthParam && /^\d{4}-\d{2}$/.test(monthParam)
+      ? monthParam
+      : getCurrentFinancialMonth(startDay);
 
-  if (monthParam && /^\d{4}-\d{2}$/.test(monthParam)) {
-    const parts = monthParam.split("-");
-    year = parseInt(parts[0], 10);
-    month = parseInt(parts[1], 10) - 1;
-  } else {
-    const now = new Date();
-    year = now.getFullYear();
-    month = now.getMonth();
-  }
-
-  const startOfMonth = new Date(year, month, 1);
-  const endOfMonth = new Date(year, month + 1, 0, 23, 59, 59, 999);
+  const { start, end } = getFinancialMonthRange(month, startDay);
 
   const result = await Transaction.aggregate([
     {
       $match: {
         userId,
         type: "expense",
-        date: { $gte: startOfMonth, $lte: endOfMonth },
+        date: { $gte: start, $lte: end },
         categoryId: { $ne: null },
       },
     },
@@ -140,7 +136,6 @@ export async function getMonthlyTrend(
 
   const trendMap = new Map<string, { income: number; expense: number }>();
 
-  // Pre-fill all months
   for (let i = 0; i < months; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() - months + 1 + i, 1);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;

@@ -6,6 +6,7 @@ import {
   getCategories,
   createCategory,
   updateCategory,
+  deleteCategory,
 } from "../controllers/categoryController.js";
 
 const createSchema = z.object({
@@ -27,5 +28,6 @@ router.use(authenticate);
 router.get("/", getCategories);
 router.post("/", validate(createSchema), createCategory);
 router.put("/:id", validate(updateSchema), updateCategory);
+router.delete("/:id", deleteCategory);
 
 export default router;

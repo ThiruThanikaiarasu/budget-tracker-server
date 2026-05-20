@@ -29,6 +29,7 @@ export async function register(req: Request, res: Response): Promise<void> {
       id: user._id,
       email: user.email,
       name: user.name,
+      financialMonthStartDay: user.financialMonthStartDay,
     },
   });
 }
@@ -63,6 +64,7 @@ export async function login(req: Request, res: Response): Promise<void> {
       id: user._id,
       email: user.email,
       name: user.name,
+      financialMonthStartDay: user.financialMonthStartDay,
     },
   });
 }
@@ -83,7 +85,36 @@ export async function getMe(req: Request, res: Response): Promise<void> {
       id: user._id,
       email: user.email,
       name: user.name,
+      financialMonthStartDay: user.financialMonthStartDay,
       createdAt: user.createdAt,
+    },
+  });
+}
+
+export async function updatePreferences(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const user = await User.findById(req.userId);
+  if (!user) {
+    res.status(401).json({ success: false, message: "User not found." });
+    return;
+  }
+
+  const { financialMonthStartDay } = req.body;
+  if (financialMonthStartDay !== undefined) {
+    user.financialMonthStartDay = financialMonthStartDay;
+  }
+
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    user: {
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      financialMonthStartDay: user.financialMonthStartDay,
     },
   });
 }

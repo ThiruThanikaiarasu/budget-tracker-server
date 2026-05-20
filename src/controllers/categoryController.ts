@@ -61,3 +61,32 @@ export async function updateCategory(
 
   res.status(200).json({ success: true, category });
 }
+
+export async function deleteCategory(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const category = await Category.findById(req.params.id);
+
+  if (!category) {
+    res.status(404).json({ success: false, message: "Category not found." });
+    return;
+  }
+
+  if (category.userId === null) {
+    res.status(403).json({
+      success: false,
+      message: "Cannot delete a default category.",
+    });
+    return;
+  }
+
+  if (category.userId.toString() !== req.userId) {
+    res.status(404).json({ success: false, message: "Category not found." });
+    return;
+  }
+
+  await category.deleteOne();
+
+  res.status(200).json({ success: true, message: "Category deleted." });
+}

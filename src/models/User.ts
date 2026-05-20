@@ -5,6 +5,7 @@ export interface IUser extends Document {
   email: string;
   password: string;
   name: string;
+  financialMonthStartDay: number;
   createdAt: Date;
   comparePassword(candidate: string): Promise<boolean>;
 }
@@ -25,6 +26,12 @@ const userSchema = new Schema<IUser>({
     type: String,
     required: true,
     trim: true,
+  },
+  financialMonthStartDay: {
+    type: Number,
+    default: 1,
+    min: 1,
+    max: 31,
   },
   createdAt: {
     type: Date,
