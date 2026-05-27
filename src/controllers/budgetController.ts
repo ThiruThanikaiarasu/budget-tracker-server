@@ -109,6 +109,12 @@ export async function getMonthlySummary(
     },
   ]);
 
+  const categoryLimitSum = budget
+    ? budget.categoryBudgets.reduce((sum, cb) => sum + cb.limit, 0)
+    : 0;
+
+  const totalBudget = budget?.overallLimit || categoryLimitSum || null;
+
   const dailyLimit = budget?.overallLimit
     ? Math.round((budget.overallLimit / daysInPeriod) * 100) / 100
     : null;
@@ -167,6 +173,7 @@ export async function getMonthlySummary(
       daysInPeriod,
       periodStart: formatDateStr(start),
       overallLimit: budget?.overallLimit || null,
+      totalBudget,
       dailyLimit,
       totalSpent,
       days,
