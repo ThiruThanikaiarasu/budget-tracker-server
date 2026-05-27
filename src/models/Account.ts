@@ -30,7 +30,7 @@ const accountSchema = new Schema<IAccount>(
       enum: ["cash", "bank_account", "credit_card", "upi_wallet", "other"],
     },
     balance: {
-      type: Number,
+      type: Schema.Types.Double,
       default: 0,
     },
     color: {

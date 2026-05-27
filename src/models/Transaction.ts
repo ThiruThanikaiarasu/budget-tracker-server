@@ -27,7 +27,7 @@ const transactionSchema = new Schema<ITransaction>(
       enum: ["income", "expense", "transfer"],
     },
     amount: {
-      type: Number,
+      type: Schema.Types.Double,
       required: true,
       min: 0,
     },
