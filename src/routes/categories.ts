@@ -7,6 +7,7 @@ import {
   createCategory,
   updateCategory,
   deleteCategory,
+  reorderCategories,
 } from "../controllers/categoryController.js";
 
 const createSchema = z.object({
@@ -21,12 +22,17 @@ const updateSchema = z.object({
   icon: z.string().optional(),
 });
 
+const reorderSchema = z.object({
+  orderedIds: z.array(z.string()),
+});
+
 const router = Router();
 
 router.use(authenticate);
 
 router.get("/", getCategories);
 router.post("/", validate(createSchema), createCategory);
+router.patch("/reorder", validate(reorderSchema), reorderCategories);
 router.put("/:id", validate(updateSchema), updateCategory);
 router.delete("/:id", deleteCategory);
 

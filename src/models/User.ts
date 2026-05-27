@@ -6,6 +6,8 @@ export interface IUser extends Document {
   password: string;
   name: string;
   financialMonthStartDay: number;
+  hiddenCategoryIds: mongoose.Types.ObjectId[];
+  categoryOrder: mongoose.Types.ObjectId[];
   createdAt: Date;
   comparePassword(candidate: string): Promise<boolean>;
 }
@@ -32,6 +34,16 @@ const userSchema = new Schema<IUser>({
     default: 1,
     min: 1,
     max: 31,
+  },
+  hiddenCategoryIds: {
+    type: [Schema.Types.ObjectId],
+    ref: 'Category',
+    default: [],
+  },
+  categoryOrder: {
+    type: [Schema.Types.ObjectId],
+    ref: 'Category',
+    default: [],
   },
   createdAt: {
     type: Date,
