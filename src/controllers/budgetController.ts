@@ -151,7 +151,7 @@ export async function getMonthlySummary(
 
   const categorySummary = budget
     ? budget.categoryBudgets.map((cb) => {
-        const catId = cb.categoryId.toString();
+        const catId = String((cb.categoryId as any)._id ?? cb.categoryId);
         const catTotalSpent = categorySpendingMap[catId] || 0;
         const isDaily = cb.frequency === "daily";
         return {
@@ -272,7 +272,7 @@ export async function getTodaySummary(
     : null;
 
   const categoryStatus = budget.categoryBudgets.map((cb) => {
-    const catId = cb.categoryId.toString();
+    const catId = String((cb.categoryId as any)._id ?? cb.categoryId);
     const isDaily = cb.frequency === "daily";
 
     if (isDaily) {
