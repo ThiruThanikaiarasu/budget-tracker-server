@@ -84,7 +84,7 @@ export async function getMonthlySummary(
     {
       $group: {
         _id: { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
   ]);
@@ -104,7 +104,7 @@ export async function getMonthlySummary(
           date: { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
           categoryId: "$categoryId",
         },
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
   ]);
@@ -227,7 +227,7 @@ export async function getTodaySummary(
     {
       $group: {
         _id: null,
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
   ]);
@@ -244,7 +244,7 @@ export async function getTodaySummary(
     {
       $group: {
         _id: "$categoryId",
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
   ]);
@@ -261,7 +261,7 @@ export async function getTodaySummary(
     {
       $group: {
         _id: "$categoryId",
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
   ]);

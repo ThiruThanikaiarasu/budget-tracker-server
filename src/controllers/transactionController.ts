@@ -76,6 +76,18 @@ export async function createTransaction(
   try {
     let transaction: InstanceType<typeof Transaction> | null = null;
 
+    // When the expense is split, only the user's own share counts toward
+    // their budget. splits hold the friends' amounts; the remainder is the
+    // user's share of the full `amount`.
+    let personalShare: number | undefined;
+    if (splits && splits.length > 0) {
+      const splitTotal = splits.reduce(
+        (sum: number, s: { amount: number }) => sum + s.amount,
+        0
+      );
+      personalShare = Math.round((amount - splitTotal) * 100) / 100;
+    }
+
     await session.withTransaction(async () => {
       // Only update account balance if user paid (accountId present)
       const effectiveAccountId = paidByFriendId ? undefined : accountId;
@@ -93,6 +105,7 @@ export async function createTransaction(
             userId: req.userId,
             type,
             amount,
+            personalShare,
             categoryId: categoryId ?? undefined,
             accountId: effectiveAccountId ?? undefined,
             toAccountId: toAccountId ?? undefined,

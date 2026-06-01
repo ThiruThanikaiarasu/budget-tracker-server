@@ -4,6 +4,9 @@ export interface ITransaction extends Document {
   userId: mongoose.Types.ObjectId;
   type: "income" | "expense" | "transfer";
   amount: number;
+  // User's own share of `amount` when this expense was split with friends.
+  // Undefined for non-split transactions (the full amount is the user's).
+  personalShare?: number;
   categoryId?: mongoose.Types.ObjectId;
   accountId?: mongoose.Types.ObjectId;
   toAccountId?: mongoose.Types.ObjectId;
@@ -29,6 +32,10 @@ const transactionSchema = new Schema<ITransaction>(
     amount: {
       type: Schema.Types.Double,
       required: true,
+      min: 0,
+    },
+    personalShare: {
+      type: Schema.Types.Double,
       min: 0,
     },
     categoryId: {
