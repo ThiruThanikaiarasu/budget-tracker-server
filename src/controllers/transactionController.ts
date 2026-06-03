@@ -123,6 +123,7 @@ export async function createTransaction(
           [
             {
               userId: req.userId,
+              transactionId: transaction._id,
               description: note || "Shared expense",
               totalAmount: amount,
               paidBy: paidByFriendId || "user",
@@ -188,9 +189,27 @@ export async function getTransactions(
     Transaction.countDocuments(filter),
   ]);
 
+  // Attach split details (friends + amounts) for any split transactions on
+  // this page, so the edit form can be prefilled without a second round-trip.
+  const splits = await SharedExpense.find({
+    transactionId: { $in: transactions.map((t) => t._id) },
+    isSettlement: false,
+  })
+    .select("transactionId paidBy splits")
+    .populate("splits.friendId", "name");
+
+  const splitByTxId = new Map(
+    splits.map((s) => [s.transactionId!.toString(), s])
+  );
+
+  const transactionsWithSplit = transactions.map((t) => ({
+    ...t.toObject(),
+    split: splitByTxId.get(t._id!.toString()) ?? null,
+  }));
+
   res.status(200).json({
     success: true,
-    transactions,
+    transactions: transactionsWithSplit,
     pagination: {
       page,
       limit,
@@ -219,15 +238,34 @@ export async function getTransaction(
     return;
   }
 
-  res.status(200).json({ success: true, transaction });
+  const split = await SharedExpense.findOne({
+    transactionId: transaction._id,
+    isSettlement: false,
+  })
+    .select("paidBy splits")
+    .populate("splits.friendId", "name");
+
+  res.status(200).json({
+    success: true,
+    transaction: { ...transaction.toObject(), split: split ?? null },
+  });
 }
 
 export async function updateTransaction(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { type, amount, categoryId, accountId, toAccountId, note, date } =
-    req.body;
+  const {
+    type,
+    amount,
+    categoryId,
+    accountId,
+    toAccountId,
+    note,
+    date,
+    paidByFriendId,
+    splits,
+  } = req.body;
 
   const existing = await Transaction.findOne({
     _id: req.params.id,
@@ -240,6 +278,38 @@ export async function updateTransaction(
       .json({ success: false, message: "Transaction not found." });
     return;
   }
+
+  // If friend paid, validate the friend exists
+  if (paidByFriendId) {
+    const friend = await Friend.findOne({
+      _id: paidByFriendId,
+      userId: req.userId,
+    });
+    if (!friend) {
+      res.status(400).json({ success: false, message: "Friend not found." });
+      return;
+    }
+  }
+
+  // When split, only the user's own share counts toward the budget.
+  let personalShare: number | undefined;
+  if (splits && splits.length > 0) {
+    const splitTotal = splits.reduce(
+      (sum: number, s: { amount: number }) => sum + s.amount,
+      0
+    );
+    if (splitTotal > amount) {
+      res.status(400).json({
+        success: false,
+        message: "Split amounts exceed total amount.",
+      });
+      return;
+    }
+    personalShare = Math.round((amount - splitTotal) * 100) / 100;
+  }
+
+  // No account moves when a friend paid.
+  const effectiveAccountId = paidByFriendId ? undefined : accountId;
 
   const session = await mongoose.startSession();
   try {
@@ -255,17 +325,63 @@ export async function updateTransaction(
       );
 
       // Apply new balance effect
-      await applyBalanceEffect(type, amount, accountId, toAccountId, session);
+      await applyBalanceEffect(
+        type,
+        amount,
+        effectiveAccountId,
+        toAccountId,
+        session
+      );
 
       // Update the transaction document
       existing.type = type;
       existing.amount = amount;
+      existing.personalShare = personalShare; // undefined clears it when not split
       existing.categoryId = categoryId ?? undefined;
-      existing.accountId = accountId ?? undefined;
+      existing.accountId = effectiveAccountId ?? undefined;
       existing.toAccountId = toAccountId ?? undefined;
       existing.note = note ?? undefined;
       existing.date = new Date(date);
       await existing.save({ session });
+
+      // Keep the linked SharedExpense in sync with the edited split
+      const existingSplit = await SharedExpense.findOne({
+        transactionId: existing._id,
+        isSettlement: false,
+      }).session(session);
+
+      if (splits && splits.length > 0) {
+        if (existingSplit) {
+          existingSplit.description = note || "Shared expense";
+          existingSplit.totalAmount = amount;
+          existingSplit.paidBy = paidByFriendId || "user";
+          existingSplit.date = new Date(date);
+          existingSplit.splits = splits;
+          await existingSplit.save({ session });
+        } else {
+          await SharedExpense.create(
+            [
+              {
+                userId: req.userId,
+                transactionId: existing._id,
+                description: note || "Shared expense",
+                totalAmount: amount,
+                paidBy: paidByFriendId || "user",
+                date: new Date(date),
+                splits,
+                isSettlement: false,
+              },
+            ],
+            { session }
+          );
+        }
+      } else if (existingSplit) {
+        // Split was removed on edit — drop the now-orphaned record
+        await SharedExpense.deleteOne(
+          { _id: existingSplit._id },
+          { session }
+        );
+      }
     });
 
     const populated = await Transaction.findById(existing._id)
@@ -273,7 +389,17 @@ export async function updateTransaction(
       .populate("accountId", "name")
       .populate("toAccountId", "name");
 
-    res.status(200).json({ success: true, transaction: populated });
+    const split = await SharedExpense.findOne({
+      transactionId: existing._id,
+      isSettlement: false,
+    })
+      .select("paidBy splits")
+      .populate("splits.friendId", "name");
+
+    res.status(200).json({
+      success: true,
+      transaction: { ...populated!.toObject(), split: split ?? null },
+    });
   } finally {
     await session.endSession();
   }
@@ -309,6 +435,12 @@ export async function deleteTransaction(
       );
 
       await Transaction.deleteOne({ _id: existing._id }, { session });
+
+      // Remove the linked split, if any, so it doesn't orphan
+      await SharedExpense.deleteOne(
+        { transactionId: existing._id, isSettlement: false },
+        { session }
+      );
     });
 
     res

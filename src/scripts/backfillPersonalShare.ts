@@ -4,17 +4,20 @@ import { Transaction } from "../models/Transaction.js";
 import { SharedExpense } from "../models/SharedExpense.js";
 
 /**
- * One-time backfill for split transactions created before personalShare existed.
+ * One-time backfill for split transactions created before personalShare and
+ * the transaction<->split link existed.
  *
  * Old split transactions stored the full amount and were never linked to their
- * auto-created SharedExpense, so the budget counted the whole bill instead of
- * the user's share. We rebuild the link by matching each non-settlement
- * SharedExpense to the transaction it came from:
- *   same userId, type "expense", same date, amount === totalAmount,
- *   and personalShare not yet set.
+ * auto-created SharedExpense, so the budget counted the whole bill and the edit
+ * form couldn't load the split. We rebuild the link by matching each
+ * non-settlement, unlinked SharedExpense to the transaction it came from:
+ *   same userId, type "expense", same date, amount === totalAmount.
  *
- * Only an unambiguous (exactly one) match is updated; zero/multiple candidates
- * are skipped and logged for manual review. Idempotent and non-destructive.
+ * For an unambiguous (exactly one) match we set:
+ *   - Transaction.personalShare = totalAmount - sum(splits)   (if not already set)
+ *   - SharedExpense.transactionId = transaction._id
+ * Zero/multiple candidates are skipped and logged. Idempotent and safe to
+ * re-run (already-linked splits are ignored).
  *
  * Usage:
  *   npx tsx src/scripts/backfillPersonalShare.ts          # dry-run (no writes)
@@ -30,15 +33,17 @@ function round2(n: number): number {
 async function backfill(): Promise<void> {
   await connectDB();
 
-  const expenses = await SharedExpense.find({ isSettlement: false });
+  const expenses = await SharedExpense.find({
+    isSettlement: false,
+    transactionId: { $exists: false },
+  });
   console.log(
-    `\n${APPLY ? "APPLY" : "DRY-RUN"} — scanning ${expenses.length} non-settlement shared expenses\n`
+    `\n${APPLY ? "APPLY" : "DRY-RUN"} — scanning ${expenses.length} unlinked shared expenses\n`
   );
 
-  let updated = 0;
+  let linked = 0;
   let skippedNoMatch = 0;
   let skippedAmbiguous = 0;
-  let alreadyDone = 0;
 
   for (const exp of expenses) {
     const splitTotal = exp.splits.reduce((sum, s) => sum + s.amount, 0);
@@ -49,26 +54,13 @@ async function backfill(): Promise<void> {
       type: "expense",
       date: exp.date,
       amount: exp.totalAmount,
-      personalShare: { $exists: false },
     });
 
     const label = `"${exp.description}" ${exp.totalAmount} on ${exp.date.toISOString().slice(0, 10)}`;
 
     if (candidates.length === 0) {
-      // Could already be backfilled, or a manually-created split (no transaction).
-      const already = await Transaction.countDocuments({
-        userId: exp.userId,
-        type: "expense",
-        date: exp.date,
-        amount: exp.totalAmount,
-        personalShare: { $exists: true },
-      });
-      if (already > 0) {
-        alreadyDone++;
-      } else {
-        skippedNoMatch++;
-        console.log(`  SKIP (no match): ${label}`);
-      }
+      skippedNoMatch++;
+      console.log(`  SKIP (no match — manual split?): ${label}`);
       continue;
     }
 
@@ -81,25 +73,32 @@ async function backfill(): Promise<void> {
     }
 
     const tx = candidates[0]!;
+    const needsShare = tx.personalShare == null;
     console.log(
-      `  MATCH: ${label} -> tx ${tx._id} | amount ${tx.amount} -> personalShare ${personalShare}`
+      `  MATCH: ${label} -> tx ${tx._id} | link transactionId` +
+        (needsShare ? ` + set personalShare ${personalShare}` : ` (personalShare already ${tx.personalShare})`)
     );
 
     if (APPLY) {
-      await Transaction.updateOne(
-        { _id: tx._id },
-        { $set: { personalShare } }
+      await SharedExpense.updateOne(
+        { _id: exp._id },
+        { $set: { transactionId: tx._id } }
       );
+      if (needsShare) {
+        await Transaction.updateOne(
+          { _id: tx._id },
+          { $set: { personalShare } }
+        );
+      }
     }
-    updated++;
+    linked++;
   }
 
   console.log(
-    `\nSummary: ${updated} ${APPLY ? "updated" : "would update"}, ` +
-      `${skippedNoMatch} no-match, ${skippedAmbiguous} ambiguous, ` +
-      `${alreadyDone} already backfilled.`
+    `\nSummary: ${linked} ${APPLY ? "linked" : "would link"}, ` +
+      `${skippedNoMatch} no-match, ${skippedAmbiguous} ambiguous.`
   );
-  if (!APPLY && updated > 0) {
+  if (!APPLY && linked > 0) {
     console.log("Re-run with --apply to write these changes.");
   }
 

@@ -7,6 +7,10 @@ export interface ISplit {
 
 export interface ISharedExpense extends Document {
   userId: mongoose.Types.ObjectId;
+  // Set when this split was auto-created from a Transaction; links the two so
+  // the transaction can be edited together with its split. Absent for splits
+  // added directly via the shared-expense flow.
+  transactionId?: mongoose.Types.ObjectId;
   description: string;
   totalAmount: number;
   paidBy: "user" | mongoose.Types.ObjectId;
@@ -22,6 +26,11 @@ const sharedExpenseSchema = new Schema<ISharedExpense>(
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
+      index: true,
+    },
+    transactionId: {
+      type: Schema.Types.ObjectId,
+      ref: "Transaction",
       index: true,
     },
     description: {
