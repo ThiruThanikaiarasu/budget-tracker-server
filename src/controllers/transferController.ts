@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Account } from "../models/Account.js";
+import { Transaction } from "../models/Transaction.js";
 
 export async function createTransfer(
   req: Request,
@@ -45,7 +46,10 @@ export async function createTransfer(
     return;
   }
 
+  const txDate = date ? new Date(date) : new Date();
+
   const session = await mongoose.startSession();
+  let transaction: InstanceType<typeof Transaction> | null = null;
   try {
     await session.withTransaction(async () => {
       await Account.updateOne(
@@ -58,10 +62,32 @@ export async function createTransfer(
         { $inc: { balance: amount } },
         { session }
       );
+
+      // Record the transfer so it appears in transaction history. Balances are
+      // already adjusted above, so we do NOT re-apply any balance effect here.
+      const docs = await Transaction.create(
+        [
+          {
+            userId: req.userId,
+            type: "transfer",
+            amount,
+            accountId: fromAccountId,
+            toAccountId,
+            note: note ?? undefined,
+            date: txDate,
+          },
+        ],
+        { session }
+      );
+      transaction = docs[0];
     });
   } finally {
     await session.endSession();
   }
+
+  const populated = await Transaction.findById(transaction!._id)
+    .populate("accountId", "name")
+    .populate("toAccountId", "name");
 
   res.status(200).json({
     success: true,
@@ -70,7 +96,8 @@ export async function createTransfer(
       toAccount: toAccountId,
       amount,
       note: note ?? null,
-      date: date ?? new Date().toISOString(),
+      date: txDate.toISOString(),
     },
+    transaction: populated,
   });
 }
