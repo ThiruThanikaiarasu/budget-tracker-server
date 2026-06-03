@@ -27,7 +27,7 @@ export async function getSummary(
     {
       $group: {
         _id: "$type",
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
   ]);
@@ -77,7 +77,7 @@ export async function getCategoryBreakdown(
     {
       $group: {
         _id: "$categoryId",
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
     {
@@ -129,7 +129,7 @@ export async function getMonthlyTrend(
           month: { $month: "$date" },
           type: "$type",
         },
-        total: { $sum: "$amount" },
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
       },
     },
   ]);
