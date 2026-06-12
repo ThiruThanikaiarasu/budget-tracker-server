@@ -66,3 +66,27 @@ export async function getUserStartDay(userId: string): Promise<number> {
     .lean<{ financialMonthStartDay?: number }>();
   return user?.financialMonthStartDay || 1;
 }
+
+/** Returns the financial month ("YYYY-MM") that a given date falls in. */
+export function getFinancialMonthForDate(date: Date, startDay: number): string {
+  if (startDay <= 1) {
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1;
+    return `${year}-${String(month).padStart(2, "0")}`;
+  }
+  // If day >= startDay, this date belongs to the NEXT calendar month's financial period.
+  let year = date.getFullYear();
+  let month = date.getMonth() + 1;
+  if (date.getDate() >= startDay) {
+    month += 1;
+    if (month > 12) { month = 1; year += 1; }
+  }
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+/** Days remaining in the period from today (inclusive) to periodEnd (inclusive). Min 1. */
+export function getDaysLeftInPeriod(today: Date, periodEnd: Date): number {
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const diff = Math.floor((periodEnd.getTime() - startOfToday.getTime()) / 86400000) + 1;
+  return Math.max(1, diff);
+}

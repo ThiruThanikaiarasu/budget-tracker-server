@@ -4,6 +4,7 @@ export interface ICategoryBudget {
   categoryId: mongoose.Types.ObjectId;
   limit: number;
   frequency: "daily" | "monthly";
+  carryForward: boolean;
 }
 
 export interface IBudget extends Document {
@@ -32,6 +33,10 @@ const categoryBudgetSchema = new Schema<ICategoryBudget>(
       required: true,
       enum: ["daily", "monthly"],
       default: "daily",
+    },
+    carryForward: {
+      type: Boolean,
+      default: false,
     },
   },
   { _id: false }

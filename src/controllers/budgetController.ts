@@ -1,10 +1,16 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
+
+function fmtRupee(n: number): string {
+  return `₹${Math.round(n).toLocaleString("en-IN")}`;
+}
 import { Budget } from "../models/Budget.js";
 import { Transaction } from "../models/Transaction.js";
 import {
   getFinancialMonthRange,
   getCurrentFinancialMonth,
+  getFinancialMonthForDate,
+  getDaysLeftInPeriod,
   getUserStartDay,
   buildPeriodDays,
 } from "../utils/financialMonth.js";
@@ -58,6 +64,215 @@ export async function getBudget(
 
 function formatDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Computes the carry-forward pot for a category across all months up to currentMonth.
+ * pot = Σ (limit(m) − spent(m)) for every budget month that includes this category.
+ * Can be negative (overspend carries as debt into next month).
+ */
+async function computeCarryForwardPot(
+  userId: string,
+  categoryId: string,
+  currentMonth: string,
+  startDay: number
+): Promise<number> {
+  const budgets = await Budget.find({
+    userId,
+    "categoryBudgets.categoryId": new mongoose.Types.ObjectId(categoryId),
+    month: { $lte: currentMonth },
+  }).sort({ month: 1 });
+
+  if (budgets.length === 0) return 0;
+
+  let pot = 0;
+  for (const budget of budgets) {
+    const cb = budget.categoryBudgets.find(
+      (c) => c.categoryId.toString() === categoryId
+    );
+    if (!cb) continue;
+
+    const { start, end } = getFinancialMonthRange(budget.month, startDay);
+
+    const result = await Transaction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(userId),
+          type: "expense",
+          categoryId: new mongoose.Types.ObjectId(categoryId),
+          date: { $gte: start, $lte: end },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
+        },
+      },
+    ]);
+
+    const spent = result[0]?.total || 0;
+    pot += cb.limit - spent;
+  }
+
+  return Math.round(pot * 100) / 100;
+}
+
+/** POST /budgets/precheck — server-side budget warning before saving a transaction. */
+export async function precheck(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const { categoryId, amount, date } = req.body;
+
+  if (!amount || amount <= 0) {
+    res.status(200).json({ success: true, warnings: [] });
+    return;
+  }
+
+  const startDay = await getUserStartDay(req.userId!);
+  const txDate = date ? new Date(date) : new Date();
+  const month = getFinancialMonthForDate(txDate, startDay);
+  const { start, end, daysInPeriod } = getFinancialMonthRange(month, startDay);
+
+  const budget = await Budget.findOne({ userId: req.userId, month }).populate(
+    "categoryBudgets.categoryId",
+    "name icon"
+  );
+
+  if (!budget) {
+    res.status(200).json({ success: true, warnings: [] });
+    return;
+  }
+
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+
+  const warnings: string[] = [];
+
+  // ── Overall daily adaptive limit ──────────────────────────────────
+  if (budget.overallLimit) {
+    const monthlyResult = await Transaction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(req.userId),
+          type: "expense",
+          date: { $gte: start, $lte: endOfToday },
+        },
+      },
+      { $group: { _id: null, total: { $sum: { $ifNull: ["$personalShare", "$amount"] } } } },
+    ]);
+    const todayResult = await Transaction.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(req.userId),
+          type: "expense",
+          date: { $gte: startOfToday, $lte: endOfToday },
+        },
+      },
+      { $group: { _id: null, total: { $sum: { $ifNull: ["$personalShare", "$amount"] } } } },
+    ]);
+
+    const monthlySpent = monthlyResult[0]?.total || 0;
+    const todaySpent = todayResult[0]?.total || 0;
+    const remaining = budget.overallLimit - monthlySpent;
+    const daysLeft = getDaysLeftInPeriod(today, end);
+    const adaptiveDaily = Math.round((remaining / daysLeft) * 100) / 100;
+
+    if (todaySpent + amount > adaptiveDaily) {
+      warnings.push(
+        `Today's total: ${fmtRupee(todaySpent + amount)} (today's limit: ${fmtRupee(adaptiveDaily)})`
+      );
+    }
+  }
+
+  // ── Category-specific check ───────────────────────────────────────
+  if (categoryId) {
+    const cb = budget.categoryBudgets.find(
+      (c) => (c.categoryId as any)._id.toString() === categoryId
+    );
+    if (cb) {
+      const catName = (cb.categoryId as any).name || "Category";
+      const catIcon = (cb.categoryId as any).icon || "";
+
+      if (cb.carryForward) {
+        // Carry-forward: check against accumulated pot
+        const pot = await computeCarryForwardPot(req.userId!, categoryId, month, startDay);
+        if (pot - amount < 0) {
+          const overshoot = Math.abs(pot - amount);
+          warnings.push(
+            `${catIcon} ${catName}: pot ${fmtRupee(pot)} — this exceeds by ${fmtRupee(overshoot)}`
+          );
+        }
+      } else if (cb.frequency === "daily") {
+        // Banked pot: fixed daily share + carryover from under/over-spending on prior days
+        const priorDaysResult = await Transaction.aggregate([
+          {
+            $match: {
+              userId: new mongoose.Types.ObjectId(req.userId),
+              type: "expense",
+              categoryId: new mongoose.Types.ObjectId(categoryId),
+              date: { $gte: start, $lt: startOfToday },
+            },
+          },
+          { $group: { _id: null, total: { $sum: { $ifNull: ["$personalShare", "$amount"] } } } },
+        ]);
+        const todayCatResult = await Transaction.aggregate([
+          {
+            $match: {
+              userId: new mongoose.Types.ObjectId(req.userId),
+              type: "expense",
+              categoryId: new mongoose.Types.ObjectId(categoryId),
+              date: { $gte: startOfToday, $lte: endOfToday },
+            },
+          },
+          { $group: { _id: null, total: { $sum: { $ifNull: ["$personalShare", "$amount"] } } } },
+        ]);
+
+        const priorDaysSpent = priorDaysResult[0]?.total || 0;
+        const todayCatSpent = todayCatResult[0]?.total || 0;
+        const fixedDaily = cb.limit / daysInPeriod;
+        const daysSoFar = Math.max(
+          0,
+          Math.min(
+            daysInPeriod,
+            Math.round((startOfToday.getTime() - start.getTime()) / 86400000)
+          )
+        );
+        const pot = daysSoFar * fixedDaily - priorDaysSpent;
+        const effectiveToday = Math.round((fixedDaily + pot) * 100) / 100;
+
+        if (todayCatSpent + amount > effectiveToday) {
+          warnings.push(
+            `${catIcon} ${catName}: ${fmtRupee(todayCatSpent + amount)} today (today's limit incl. carryover: ${fmtRupee(effectiveToday)})`
+          );
+        }
+      } else {
+        // Standard monthly: compare month-to-date against limit
+        const monthResult = await Transaction.aggregate([
+          {
+            $match: {
+              userId: new mongoose.Types.ObjectId(req.userId),
+              type: "expense",
+              categoryId: new mongoose.Types.ObjectId(categoryId),
+              date: { $gte: start, $lte: endOfToday },
+            },
+          },
+          { $group: { _id: null, total: { $sum: { $ifNull: ["$personalShare", "$amount"] } } } },
+        ]);
+        const monthToDateSpent = monthResult[0]?.total || 0;
+
+        if (monthToDateSpent + amount > cb.limit) {
+          warnings.push(
+            `${catIcon} ${catName}: ${fmtRupee(monthToDateSpent + amount)} this month (limit: ${fmtRupee(cb.limit)})`
+          );
+        }
+      }
+    }
+  }
+
+  res.status(200).json({ success: true, warnings });
 }
 
 export async function getMonthlySummary(
@@ -133,6 +348,20 @@ export async function getMonthlySummary(
 
   const periodDays = buildPeriodDays(start, daysInPeriod);
 
+  // For adaptive daily: compute today's remaining days in the period
+  const today = new Date();
+  const daysLeft = getDaysLeftInPeriod(today, end);
+
+  const totalSpent = dailySpending.reduce(
+    (sum: number, d: { total: number }) => sum + d.total,
+    0
+  );
+
+  // Adaptive overall daily limit (as of today)
+  const adaptiveOverallDaily = budget?.overallLimit
+    ? Math.round(((budget.overallLimit - totalSpent) / daysLeft) * 100) / 100
+    : null;
+
   const days = periodDays.map((pd, i) => {
     const spent = spendingMap[pd.date] || 0;
     return {
@@ -144,26 +373,37 @@ export async function getMonthlySummary(
     };
   });
 
-  const totalSpent = dailySpending.reduce(
-    (sum: number, d: { total: number }) => sum + d.total,
-    0
-  );
-
   const categorySummary = budget
-    ? budget.categoryBudgets.map((cb) => {
-        const catId = String((cb.categoryId as any)._id ?? cb.categoryId);
-        const catTotalSpent = categorySpendingMap[catId] || 0;
-        const isDaily = cb.frequency === "daily";
-        return {
-          categoryId: cb.categoryId,
-          limit: cb.limit,
-          frequency: cb.frequency,
-          dailyLimit: isDaily
-            ? Math.round((cb.limit / daysInPeriod) * 100) / 100
-            : null,
-          totalSpent: catTotalSpent,
-        };
-      })
+    ? await Promise.all(
+        budget.categoryBudgets.map(async (cb) => {
+          const catId = String((cb.categoryId as any)._id ?? cb.categoryId);
+          const catTotalSpent = categorySpendingMap[catId] || 0;
+          const isDaily = cb.frequency === "daily";
+
+          let pot: number | null = null;
+          let adaptiveDaily: number | null = null;
+
+          if (cb.carryForward) {
+            pot = await computeCarryForwardPot(req.userId!, catId, month, startDay);
+          } else if (isDaily) {
+            const remaining = cb.limit - catTotalSpent;
+            adaptiveDaily = Math.round((remaining / daysLeft) * 100) / 100;
+          }
+
+          return {
+            categoryId: cb.categoryId,
+            limit: cb.limit,
+            frequency: cb.frequency,
+            carryForward: cb.carryForward,
+            dailyLimit: isDaily
+              ? Math.round((cb.limit / daysInPeriod) * 100) / 100
+              : null,
+            adaptiveDaily,
+            pot,
+            totalSpent: catTotalSpent,
+          };
+        })
+      )
     : [];
 
   res.status(200).json({
@@ -175,6 +415,7 @@ export async function getMonthlySummary(
       overallLimit: budget?.overallLimit || null,
       totalBudget,
       dailyLimit,
+      adaptiveOverallDaily,
       totalSpent,
       days,
       categorySummary,
@@ -191,12 +432,12 @@ export async function getTodaySummary(
   const { start, end, daysInPeriod } = getFinancialMonthRange(month, startDay);
 
   const today = new Date();
-  const startOfDay = new Date(
+  const startOfToday = new Date(
     today.getFullYear(),
     today.getMonth(),
     today.getDate()
   );
-  const endOfDay = new Date(
+  const endOfToday = new Date(
     today.getFullYear(),
     today.getMonth(),
     today.getDate(),
@@ -221,7 +462,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
-        date: { $gte: startOfDay, $lte: endOfDay },
+        date: { $gte: startOfToday, $lte: endOfToday },
       },
     },
     {
@@ -237,7 +478,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
-        date: { $gte: startOfDay, $lte: endOfDay },
+        date: { $gte: startOfToday, $lte: endOfToday },
         categoryId: { $exists: true },
       },
     },
@@ -254,7 +495,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
-        date: { $gte: start, $lte: endOfDay },
+        date: { $gte: start, $lte: endOfToday },
         categoryId: { $exists: true },
       },
     },
@@ -267,42 +508,80 @@ export async function getTodaySummary(
   ]);
 
   const todaySpent = todayExpenses[0]?.total || 0;
+  const daysLeft = getDaysLeftInPeriod(today, end);
+
+  // Adaptive overall daily limit
+  const monthlyTotalResult = await Transaction.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(req.userId),
+        type: "expense",
+        date: { $gte: start, $lte: endOfToday },
+      },
+    },
+    { $group: { _id: null, total: { $sum: { $ifNull: ["$personalShare", "$amount"] } } } },
+  ]);
+  const monthlyTotalSpent = monthlyTotalResult[0]?.total || 0;
+
   const dailyLimit = budget.overallLimit
-    ? Math.round((budget.overallLimit / daysInPeriod) * 100) / 100
+    ? Math.round(((budget.overallLimit - monthlyTotalSpent) / daysLeft) * 100) / 100
     : null;
 
-  const categoryStatus = budget.categoryBudgets.map((cb) => {
-    const catId = String((cb.categoryId as any)._id ?? cb.categoryId);
-    const isDaily = cb.frequency === "daily";
+  const categoryStatus = await Promise.all(
+    budget.categoryBudgets.map(async (cb) => {
+      const catId = String((cb.categoryId as any)._id ?? cb.categoryId);
 
-    if (isDaily) {
-      const catDailyLimit =
-        Math.round((cb.limit / daysInPeriod) * 100) / 100;
-      const catSpent =
-        todayCategoryExpenses.find((e) => e._id.toString() === catId)?.total ||
-        0;
-      return {
-        categoryId: cb.categoryId,
-        frequency: cb.frequency,
-        limit: cb.limit,
-        effectiveLimit: catDailyLimit,
-        spent: catSpent,
-        isOver: catSpent > catDailyLimit,
-      };
-    } else {
-      const catMonthlySpent =
-        monthlyCategoryExpenses.find((e) => e._id.toString() === catId)
-          ?.total || 0;
-      return {
-        categoryId: cb.categoryId,
-        frequency: cb.frequency,
-        limit: cb.limit,
-        effectiveLimit: cb.limit,
-        spent: catMonthlySpent,
-        isOver: catMonthlySpent > cb.limit,
-      };
-    }
-  });
+      if (cb.carryForward) {
+        // Carry-forward: pot is the effective limit
+        const pot = await computeCarryForwardPot(req.userId!, catId, month, startDay);
+        const catMonthlySpent =
+          monthlyCategoryExpenses.find((e) => e._id.toString() === catId)?.total || 0;
+        return {
+          categoryId: cb.categoryId,
+          frequency: cb.frequency,
+          carryForward: true,
+          limit: cb.limit,
+          effectiveLimit: Math.max(0, pot),
+          pot,
+          spent: catMonthlySpent,
+          isOver: pot < 0,
+        };
+      } else if (cb.frequency === "daily") {
+        // Adaptive pacing: remaining ÷ days-left
+        const catMonthlySpent =
+          monthlyCategoryExpenses.find((e) => e._id.toString() === catId)?.total || 0;
+        const remaining = cb.limit - catMonthlySpent;
+        const adaptiveDaily = Math.round((remaining / daysLeft) * 100) / 100;
+
+        const catTodaySpent =
+          todayCategoryExpenses.find((e) => e._id.toString() === catId)?.total || 0;
+        return {
+          categoryId: cb.categoryId,
+          frequency: cb.frequency,
+          carryForward: false,
+          limit: cb.limit,
+          effectiveLimit: adaptiveDaily,
+          pot: null,
+          spent: catTodaySpent,
+          isOver: catTodaySpent > adaptiveDaily,
+        };
+      } else {
+        // Standard monthly
+        const catMonthlySpent =
+          monthlyCategoryExpenses.find((e) => e._id.toString() === catId)?.total || 0;
+        return {
+          categoryId: cb.categoryId,
+          frequency: cb.frequency,
+          carryForward: false,
+          limit: cb.limit,
+          effectiveLimit: cb.limit,
+          pot: null,
+          spent: catMonthlySpent,
+          isOver: catMonthlySpent > cb.limit,
+        };
+      }
+    })
+  );
 
   res.status(200).json({
     success: true,
