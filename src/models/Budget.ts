@@ -24,7 +24,7 @@ const categoryBudgetSchema = new Schema<ICategoryBudget>(
       required: true,
     },
     limit: {
-      type: Schema.Types.Double,
+      type: Number,
       required: true,
       min: 0,
     },
@@ -56,7 +56,7 @@ const budgetSchema = new Schema<IBudget>(
       match: /^\d{4}-\d{2}$/,
     },
     overallLimit: {
-      type: Schema.Types.Double,
+      type: Number,
       min: 0,
     },
     categoryBudgets: {

@@ -80,9 +80,14 @@ async function calculateNetBalance(
   userId: string,
   friendId: mongoose.Types.ObjectId
 ): Promise<number> {
+  // Also match expenses where this friend is the payer but not in splits
+  // (e.g. friend paid for the user alone with no other participants).
   const expenses = await SharedExpense.find({
     userId,
-    "splits.friendId": friendId,
+    $or: [
+      { "splits.friendId": friendId },
+      { paidBy: friendId.toString() },
+    ],
   });
 
   let balance = 0;
@@ -91,11 +96,9 @@ async function calculateNetBalance(
     const friendSplit = expense.splits.find(
       (s) => s.friendId.toString() === friendId.toString()
     );
-    if (!friendSplit) continue;
 
     if (expense.isSettlement) {
-      // Settlement: paidBy = "user" means user paid friend (balance decreases)
-      // paidBy = friendId means friend paid user (balance increases)
+      if (!friendSplit) continue;
       if (expense.paidBy === "user") {
         balance -= friendSplit.amount;
       } else if (expense.paidBy.toString() === friendId.toString()) {
@@ -103,11 +106,11 @@ async function calculateNetBalance(
       }
     } else {
       if (expense.paidBy === "user") {
-        // User paid, friend owes their split
+        if (!friendSplit) continue;
         balance += friendSplit.amount;
       } else if (expense.paidBy.toString() === friendId.toString()) {
-        // Friend paid, user owes their share
-        // User's share = totalAmount - sum of all friend splits
+        // Friend paid — user owes their share (total minus all friends' portions).
+        // When splits is empty the user owes the full amount.
         const totalFriendSplits = expense.splits.reduce(
           (sum, s) => sum + s.amount,
           0

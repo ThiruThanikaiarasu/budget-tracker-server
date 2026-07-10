@@ -74,7 +74,10 @@ export async function getSharedExpenses(
   const filter: Record<string, unknown> = { userId: req.userId };
 
   if (req.query.friendId) {
-    filter["splits.friendId"] = req.query.friendId;
+    filter.$or = [
+      { "splits.friendId": req.query.friendId },
+      { paidBy: req.query.friendId },
+    ];
   }
 
   const expenses = await SharedExpense.find(filter)
@@ -98,22 +101,19 @@ export async function getBalances(
       const friendSplit = expense.splits.find(
         (s) => s.friendId.toString() === friend._id!.toString()
       );
-      if (!friendSplit) continue;
 
       if (expense.isSettlement) {
+        if (!friendSplit) continue;
         if (expense.paidBy === "user") {
           balance -= friendSplit.amount;
-        } else if (
-          expense.paidBy.toString() === friend._id!.toString()
-        ) {
+        } else if (expense.paidBy.toString() === friend._id!.toString()) {
           balance += friendSplit.amount;
         }
       } else {
         if (expense.paidBy === "user") {
+          if (!friendSplit) continue;
           balance += friendSplit.amount;
-        } else if (
-          expense.paidBy.toString() === friend._id!.toString()
-        ) {
+        } else if (expense.paidBy.toString() === friend._id!.toString()) {
           const totalFriendSplits = expense.splits.reduce(
             (sum, s) => sum + s.amount,
             0

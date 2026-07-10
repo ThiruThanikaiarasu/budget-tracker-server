@@ -49,12 +49,12 @@ const investmentSchema = new Schema<IInvestment>(
       ],
     },
     amountInvested: {
-      type: Schema.Types.Double,
+      type: Number,
       required: true,
       min: 0,
     },
     currentValue: {
-      type: Schema.Types.Double,
+      type: Number,
       required: true,
       min: 0,
     },

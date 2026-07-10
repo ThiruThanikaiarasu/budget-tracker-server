@@ -89,13 +89,14 @@ export async function createTransaction(
     }
 
     await session.withTransaction(async () => {
-      // Only update account balance if user paid (accountId present)
-      const effectiveAccountId = paidByFriendId ? undefined : accountId;
+      // Only update account balance if user paid (accountId present).
+      // Use || undefined so an empty string from the client is treated as absent.
+      const effectiveAccountId = paidByFriendId ? undefined : (accountId || undefined);
       await applyBalanceEffect(
         type,
         amount,
         effectiveAccountId,
-        toAccountId,
+        toAccountId || undefined,
         session
       );
 
@@ -106,9 +107,10 @@ export async function createTransaction(
             type,
             amount,
             personalShare,
-            categoryId: categoryId ?? undefined,
-            accountId: effectiveAccountId ?? undefined,
-            toAccountId: toAccountId ?? undefined,
+            categoryId: categoryId || undefined,
+            accountId: effectiveAccountId,
+            toAccountId: toAccountId || undefined,
+            paidByFriendId: paidByFriendId || undefined,
             note: note ?? undefined,
             date: new Date(date),
           },
@@ -117,8 +119,10 @@ export async function createTransaction(
       );
       transaction = docs[0];
 
-      // Auto-create SharedExpense if splits are provided
-      if (splits && splits.length > 0) {
+      // Auto-create SharedExpense when a friend paid OR when splits exist.
+      // A friend paying with no other participants still creates a record so
+      // the debt (user owes friend the full amount) is tracked in the balance.
+      if (paidByFriendId || (splits && splits.length > 0)) {
         await SharedExpense.create(
           [
             {
@@ -128,7 +132,7 @@ export async function createTransaction(
               totalAmount: amount,
               paidBy: paidByFriendId || "user",
               date: new Date(date),
-              splits,
+              splits: splits || [],
               isSettlement: false,
             },
           ],
@@ -140,7 +144,11 @@ export async function createTransaction(
     const populated = await Transaction.findById(transaction!._id)
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
-      .populate("toAccountId", "name");
+      .populate("toAccountId", "name")
+      .populate("paidByFriendId", "name");
+
+    console.log("[CREATE] saved paidByFriendId:", transaction!.paidByFriendId);
+    console.log("[CREATE] populated paidByFriendId:", (populated as any)?.paidByFriendId);
 
     res.status(201).json({ success: true, transaction: populated });
   } finally {
@@ -185,7 +193,8 @@ export async function getTransactions(
       .limit(limit)
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
-      .populate("toAccountId", "name"),
+      .populate("toAccountId", "name")
+      .populate("paidByFriendId", "name"),
     Transaction.countDocuments(filter),
   ]);
 
@@ -229,7 +238,8 @@ export async function getTransaction(
   })
     .populate("categoryId", "name icon")
     .populate("accountId", "name")
-    .populate("toAccountId", "name");
+    .populate("toAccountId", "name")
+    .populate("paidByFriendId", "name");
 
   if (!transaction) {
     res
@@ -309,7 +319,8 @@ export async function updateTransaction(
   }
 
   // No account moves when a friend paid.
-  const effectiveAccountId = paidByFriendId ? undefined : accountId;
+  // Use || undefined so an empty string from the client is treated as absent.
+  const effectiveAccountId = paidByFriendId ? undefined : (accountId || undefined);
 
   const session = await mongoose.startSession();
   try {
@@ -329,7 +340,7 @@ export async function updateTransaction(
         type,
         amount,
         effectiveAccountId,
-        toAccountId,
+        toAccountId || undefined,
         session
       );
 
@@ -337,9 +348,10 @@ export async function updateTransaction(
       existing.type = type;
       existing.amount = amount;
       existing.personalShare = personalShare; // undefined clears it when not split
-      existing.categoryId = categoryId ?? undefined;
-      existing.accountId = effectiveAccountId ?? undefined;
-      existing.toAccountId = toAccountId ?? undefined;
+      existing.categoryId = categoryId || undefined;
+      existing.accountId = effectiveAccountId;
+      existing.toAccountId = toAccountId || undefined;
+      existing.paidByFriendId = paidByFriendId || undefined;
       existing.note = note ?? undefined;
       existing.date = new Date(date);
       await existing.save({ session });
@@ -350,13 +362,13 @@ export async function updateTransaction(
         isSettlement: false,
       }).session(session);
 
-      if (splits && splits.length > 0) {
+      if (paidByFriendId || (splits && splits.length > 0)) {
         if (existingSplit) {
           existingSplit.description = note || "Shared expense";
           existingSplit.totalAmount = amount;
           existingSplit.paidBy = paidByFriendId || "user";
           existingSplit.date = new Date(date);
-          existingSplit.splits = splits;
+          existingSplit.splits = splits || [];
           await existingSplit.save({ session });
         } else {
           await SharedExpense.create(
@@ -368,7 +380,7 @@ export async function updateTransaction(
                 totalAmount: amount,
                 paidBy: paidByFriendId || "user",
                 date: new Date(date),
-                splits,
+                splits: splits || [],
                 isSettlement: false,
               },
             ],
@@ -387,7 +399,8 @@ export async function updateTransaction(
     const populated = await Transaction.findById(existing._id)
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
-      .populate("toAccountId", "name");
+      .populate("toAccountId", "name")
+      .populate("paidByFriendId", "name");
 
     const split = await SharedExpense.findOne({
       transactionId: existing._id,

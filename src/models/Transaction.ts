@@ -10,6 +10,8 @@ export interface ITransaction extends Document {
   categoryId?: mongoose.Types.ObjectId;
   accountId?: mongoose.Types.ObjectId;
   toAccountId?: mongoose.Types.ObjectId;
+  // Set when a friend paid on behalf of the user; absent when the user paid.
+  paidByFriendId?: mongoose.Types.ObjectId;
   note?: string;
   date: Date;
   createdAt: Date;
@@ -30,12 +32,12 @@ const transactionSchema = new Schema<ITransaction>(
       enum: ["income", "expense", "transfer"],
     },
     amount: {
-      type: Schema.Types.Double,
+      type: Number,
       required: true,
       min: 0,
     },
     personalShare: {
-      type: Schema.Types.Double,
+      type: Number,
       min: 0,
     },
     categoryId: {
@@ -49,6 +51,10 @@ const transactionSchema = new Schema<ITransaction>(
     toAccountId: {
       type: Schema.Types.ObjectId,
       ref: "Account",
+    },
+    paidByFriendId: {
+      type: Schema.Types.ObjectId,
+      ref: "Friend",
     },
     note: {
       type: String,
