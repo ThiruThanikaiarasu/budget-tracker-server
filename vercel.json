@@ -11,5 +11,15 @@
       "src": "/(.*)",
       "dest": "api/index.ts"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/v1/snapshots/cron?cadence=weekly",
+      "schedule": "0 12 * * 0"
+    },
+    {
+      "path": "/api/v1/snapshots/cron?cadence=monthly",
+      "schedule": "0 12 1 * *"
+    }
   ]
 }

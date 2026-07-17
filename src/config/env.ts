@@ -9,4 +9,6 @@ export const env = {
   CORS_ORIGINS: process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
     : ["http://localhost:5173"],
+  // Shared secret Vercel Cron sends as `Authorization: Bearer <CRON_SECRET>`.
+  CRON_SECRET: process.env.CRON_SECRET || "",
 } as const;

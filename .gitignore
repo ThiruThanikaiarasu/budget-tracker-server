@@ -19,3 +19,6 @@ npm-debug.log*
 
 # Vercel
 .vercel
+
+# Local Zerodha sync payload (personal holdings)
+src/scripts/zerodha-latest.json

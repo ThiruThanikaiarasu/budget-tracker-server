@@ -10,8 +10,11 @@ import {
 } from "../controllers/investmentController.js";
 
 const investmentTypes = [
-  "mutual_fund",
   "stocks",
+  "index_fund",
+  "mutual_fund",
+  "us_stock",
+  "bond",
   "fd",
   "ppf",
   "gold",
@@ -20,31 +23,44 @@ const investmentTypes = [
   "other",
 ] as const;
 
-const createSchema = z.object({
-  name: z.string().min(1),
-  type: z.enum(investmentTypes),
-  amountInvested: z.number().min(0),
-  currentValue: z.number().min(0),
-  dateInvested: z.string().min(1),
-  note: z.string().optional(),
-});
+const exchanges = ["NSE", "BSE", "NASDAQ", "NYSE", "other"] as const;
 
-const updateSchema = z.object({
-  name: z.string().min(1),
-  type: z.enum(investmentTypes),
-  amountInvested: z.number().min(0),
-  currentValue: z.number().min(0),
-  dateInvested: z.string().min(1),
-  note: z.string().optional(),
-});
+const investmentSchema = z
+  .object({
+    name: z.string().min(1),
+    type: z.enum(investmentTypes),
+    dateInvested: z.string().min(1),
+    note: z.string().optional(),
+    // Holdings-mode fields
+    symbol: z.string().optional(),
+    exchange: z.enum(exchanges).optional(),
+    sector: z.string().optional(),
+    quantity: z.number().min(0).optional(),
+    avgBuyPrice: z.number().min(0).optional(),
+    currentPrice: z.number().min(0).optional(),
+    currency: z.string().optional(),
+    // Lump-sum amounts (optional — derived from qty*price in holdings mode)
+    amountInvested: z.number().min(0).optional(),
+    currentValue: z.number().min(0).optional(),
+  })
+  .refine(
+    (data) =>
+      (data.quantity !== undefined && data.avgBuyPrice !== undefined) ||
+      data.amountInvested !== undefined,
+    {
+      message:
+        "Provide either quantity + avgBuyPrice (holdings) or amountInvested (lump-sum).",
+      path: ["amountInvested"],
+    }
+  );
 
 const router = Router();
 
 router.use(authenticate);
 
-router.post("/", validate(createSchema), createInvestment);
+router.post("/", validate(investmentSchema), createInvestment);
 router.get("/", getInvestments);
-router.put("/:id", validate(updateSchema), updateInvestment);
+router.put("/:id", validate(investmentSchema), updateInvestment);
 router.patch("/:id/toggle", toggleInvestment);
 
 export default router;
