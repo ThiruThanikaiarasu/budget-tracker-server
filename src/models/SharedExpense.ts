@@ -17,6 +17,12 @@ export interface ISharedExpense extends Document {
   date: Date;
   splits: ISplit[];
   isSettlement: boolean;
+  // On a settlement (isSettlement=true), the open SharedExpenses this settlement
+  // cleared. Purely presentational: lets the UI move covered items into history.
+  // Does not affect balance math. Absent/empty for non-settlement expenses.
+  coveredExpenseIds?: mongoose.Types.ObjectId[];
+  // How a settlement was resolved. Absent for non-settlement expenses.
+  settlementMethod?: "received" | "paid" | "waived";
   createdAt: Date;
 }
 
@@ -68,6 +74,16 @@ const sharedExpenseSchema = new Schema<ISharedExpense>(
     isSettlement: {
       type: Boolean,
       default: false,
+    },
+    coveredExpenseIds: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "SharedExpense",
+      },
+    ],
+    settlementMethod: {
+      type: String,
+      enum: ["received", "paid", "waived"],
     },
   },
   { timestamps: true }
