@@ -10,6 +10,9 @@ import splitRoutes from "./splits.js";
 import investmentRoutes from "./investments.js";
 import snapshotRoutes from "./snapshots.js";
 import targetRoutes from "./targets.js";
+import watchlistRoutes from "./watchlists.js";
+import stockAnalysisRoutes from "./stockAnalysis.js";
+import investmentBudgetRoutes from "./investmentBudgets.js";
 import budgetRoutes from "./budgets.js";
 
 const router = Router();
@@ -25,6 +28,9 @@ router.use("/splits", splitRoutes);
 router.use("/investments", investmentRoutes);
 router.use("/snapshots", snapshotRoutes);
 router.use("/targets", targetRoutes);
+router.use("/watchlists", watchlistRoutes);
+router.use("/stock-analysis", stockAnalysisRoutes);
+router.use("/investment-budgets", investmentBudgetRoutes);
 router.use("/budgets", budgetRoutes);
 
 export default router;
