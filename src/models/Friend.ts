@@ -5,6 +5,8 @@ export interface IFriend extends Document {
   name: string;
   phone?: string;
   email?: string;
+  frecencyScore: number;
+  lastInteractedAt?: Date;
   createdAt: Date;
 }
 
@@ -28,6 +30,14 @@ const friendSchema = new Schema<IFriend>(
     email: {
       type: String,
       trim: true,
+    },
+    // Recency-weighted usage score (decays); drives "frequent friends first".
+    frecencyScore: {
+      type: Number,
+      default: 0,
+    },
+    lastInteractedAt: {
+      type: Date,
     },
   },
   { timestamps: true }

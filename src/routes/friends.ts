@@ -6,6 +6,7 @@ import {
   createFriend,
   getFriends,
   updateFriend,
+  recordInteraction,
 } from "../controllers/friendController.js";
 
 const createSchema = z.object({
@@ -26,6 +27,7 @@ router.use(authenticate);
 
 router.post("/", validate(createSchema), createFriend);
 router.get("/", getFriends);
+router.post("/:id/interact", recordInteraction);
 router.put("/:id", validate(updateSchema), updateFriend);
 
 export default router;

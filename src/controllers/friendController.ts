@@ -44,6 +44,35 @@ export async function getFriends(
   res.status(200).json({ success: true, friends: friendsWithBalance });
 }
 
+// Frecency: each interaction adds 1 to a score that halves every 7 days.
+const FRECENCY_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+const FRECENCY_LAMBDA = Math.LN2 / FRECENCY_HALF_LIFE_MS;
+
+/**
+ * Record that the user interacted with a friend (opened their detail, split with
+ * them). Decays the existing score to "now", then adds 1 — so recent, repeated
+ * use ranks a friend higher and stale activity fades.
+ */
+export async function recordInteraction(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const friend = await Friend.findOne({ _id: req.params.id, userId: req.userId });
+  if (!friend) {
+    res.status(404).json({ success: false, message: "Friend not found." });
+    return;
+  }
+
+  const now = Date.now();
+  const last = friend.lastInteractedAt ? friend.lastInteractedAt.getTime() : now;
+  const decayed = (friend.frecencyScore || 0) * Math.exp(-FRECENCY_LAMBDA * Math.max(0, now - last));
+  friend.frecencyScore = decayed + 1;
+  friend.lastInteractedAt = new Date(now);
+  await friend.save();
+
+  res.status(200).json({ success: true, friend });
+}
+
 export async function updateFriend(
   req: Request,
   res: Response
