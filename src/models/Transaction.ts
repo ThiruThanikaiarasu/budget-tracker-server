@@ -12,6 +12,10 @@ export interface ITransaction extends Document {
   toAccountId?: mongoose.Types.ObjectId;
   // Set when a friend paid on behalf of the user; absent when the user paid.
   paidByFriendId?: mongoose.Types.ObjectId;
+  // Balance-reconciliation entry ("Clean up · new journey"): adjusts an account
+  // to a real balance. Excluded from spend/income/budget reports but still shown
+  // in the transaction history.
+  isAdjustment?: boolean;
   note?: string;
   date: Date;
   createdAt: Date;
@@ -55,6 +59,9 @@ const transactionSchema = new Schema<ITransaction>(
     paidByFriendId: {
       type: Schema.Types.ObjectId,
       ref: "Friend",
+    },
+    isAdjustment: {
+      type: Boolean,
     },
     note: {
       type: String,

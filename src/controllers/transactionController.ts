@@ -418,6 +418,77 @@ export async function updateTransaction(
   }
 }
 
+/**
+ * Reconcile account balances to reality ("Clean up · new journey"). For each
+ * account the user enters its true current balance; we book a single adjustment
+ * transaction for the difference (income if the real balance is higher, expense
+ * if lower) and move the account to match. Adjustments are flagged so reports
+ * ignore them, but they still appear in history for an honest paper trail.
+ */
+export async function cleanupAccounts(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const { balances }: { balances: { accountId: string; newBalance: number }[] } =
+    req.body;
+
+  const accountIds = balances.map((b) => b.accountId);
+  const accounts = await Account.find({
+    _id: { $in: accountIds },
+    userId: req.userId,
+  });
+  if (accounts.length !== new Set(accountIds).size) {
+    res
+      .status(404)
+      .json({ success: false, message: "One or more accounts not found." });
+    return;
+  }
+  const byId = new Map(accounts.map((a) => [a._id!.toString(), a]));
+
+  const now = new Date();
+  const created: InstanceType<typeof Transaction>[] = [];
+
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      for (const { accountId, newBalance } of balances) {
+        const account = byId.get(accountId)!;
+        const delta = Math.round((newBalance - account.balance) * 100) / 100;
+        if (Math.abs(delta) < 0.005) continue; // already correct
+
+        const docs = await Transaction.create(
+          [
+            {
+              userId: req.userId,
+              type: delta > 0 ? "income" : "expense",
+              amount: Math.abs(delta),
+              accountId,
+              isAdjustment: true,
+              note: "Clean up · new journey",
+              date: now,
+            },
+          ],
+          { session }
+        );
+        await Account.updateOne(
+          { _id: accountId },
+          { $inc: { balance: delta } },
+          { session }
+        );
+        created.push(docs[0]);
+      }
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  res.status(200).json({
+    success: true,
+    count: created.length,
+    transactions: created,
+  });
+}
+
 export async function deleteTransaction(
   req: Request,
   res: Response

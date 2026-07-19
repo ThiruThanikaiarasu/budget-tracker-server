@@ -21,6 +21,7 @@ export async function getSummary(
       $match: {
         userId,
         type: { $in: ["income", "expense"] },
+        isAdjustment: { $ne: true },
         date: { $gte: start, $lte: end },
       },
     },
@@ -119,6 +120,7 @@ export async function getMonthlyTrend(
       $match: {
         userId,
         type: { $in: ["income", "expense"] },
+        isAdjustment: { $ne: true },
         date: { $gte: startDate },
       },
     },

@@ -8,6 +8,7 @@ import {
   getTransaction,
   updateTransaction,
   deleteTransaction,
+  cleanupAccounts,
 } from "../controllers/transactionController.js";
 
 const transactionSchema = z.object({
@@ -29,10 +30,22 @@ const transactionSchema = z.object({
     .optional(),
 });
 
+const cleanupSchema = z.object({
+  balances: z
+    .array(
+      z.object({
+        accountId: z.string().min(1),
+        newBalance: z.number(),
+      })
+    )
+    .min(1),
+});
+
 const router = Router();
 
 router.use(authenticate);
 
+router.post("/cleanup", validate(cleanupSchema), cleanupAccounts);
 router.post("/", validate(transactionSchema), createTransaction);
 router.get("/", getTransactions);
 router.get("/:id", getTransaction);

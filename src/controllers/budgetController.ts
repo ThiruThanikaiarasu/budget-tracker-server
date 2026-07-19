@@ -99,6 +99,7 @@ async function computeCarryForwardPot(
         $match: {
           userId: new mongoose.Types.ObjectId(userId),
           type: "expense",
+          isAdjustment: { $ne: true },
           categoryId: new mongoose.Types.ObjectId(categoryId),
           date: { $gte: start, $lte: end },
         },
@@ -158,6 +159,7 @@ export async function precheck(
         $match: {
           userId: new mongoose.Types.ObjectId(req.userId),
           type: "expense",
+          isAdjustment: { $ne: true },
           date: { $gte: start, $lte: endOfToday },
         },
       },
@@ -168,6 +170,7 @@ export async function precheck(
         $match: {
           userId: new mongoose.Types.ObjectId(req.userId),
           type: "expense",
+          isAdjustment: { $ne: true },
           date: { $gte: startOfToday, $lte: endOfToday },
         },
       },
@@ -293,6 +296,7 @@ export async function getMonthlySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
+        isAdjustment: { $ne: true },
         date: { $gte: start, $lte: end },
       },
     },
@@ -309,6 +313,7 @@ export async function getMonthlySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
+        isAdjustment: { $ne: true },
         date: { $gte: start, $lte: end },
         categoryId: { $exists: true },
       },
@@ -462,6 +467,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
+        isAdjustment: { $ne: true },
         date: { $gte: startOfToday, $lte: endOfToday },
       },
     },
@@ -478,6 +484,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
+        isAdjustment: { $ne: true },
         date: { $gte: startOfToday, $lte: endOfToday },
         categoryId: { $exists: true },
       },
@@ -495,6 +502,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
+        isAdjustment: { $ne: true },
         date: { $gte: start, $lte: endOfToday },
         categoryId: { $exists: true },
       },
@@ -516,6 +524,7 @@ export async function getTodaySummary(
       $match: {
         userId: new mongoose.Types.ObjectId(req.userId),
         type: "expense",
+        isAdjustment: { $ne: true },
         date: { $gte: start, $lte: endOfToday },
       },
     },
