@@ -3,6 +3,10 @@ import mongoose from "mongoose";
 import { Account } from "../models/Account.js";
 import { Transaction } from "../models/Transaction.js";
 
+// Thrown inside the session to abort the transaction; caught outside to
+// report a 400 instead of a generic 500.
+class InsufficientBalanceError extends Error {}
+
 export async function createTransfer(
   req: Request,
   res: Response
@@ -38,25 +42,23 @@ export async function createTransfer(
     return;
   }
 
-  if (fromAccount.balance < amount) {
-    res.status(400).json({
-      success: false,
-      message: "Insufficient balance in source account.",
-    });
-    return;
-  }
-
   const txDate = date ? new Date(date) : new Date();
 
   const session = await mongoose.startSession();
   let transaction: InstanceType<typeof Transaction> | null = null;
   try {
     await session.withTransaction(async () => {
-      await Account.updateOne(
-        { _id: fromAccountId },
+      // Debit atomically: the balance>=amount check is part of the same
+      // filter as the decrement, so two concurrent transfers can't both
+      // pass a separate up-front check and overdraw the account.
+      const debited = await Account.updateOne(
+        { _id: fromAccountId, balance: { $gte: amount } },
         { $inc: { balance: -amount } },
         { session }
       );
+      if (debited.matchedCount === 0) {
+        throw new InsufficientBalanceError();
+      }
       await Account.updateOne(
         { _id: toAccountId },
         { $inc: { balance: amount } },
@@ -81,6 +83,15 @@ export async function createTransfer(
       );
       transaction = docs[0];
     });
+  } catch (err) {
+    if (err instanceof InsufficientBalanceError) {
+      res.status(400).json({
+        success: false,
+        message: "Insufficient balance in source account.",
+      });
+      return;
+    }
+    throw err;
   } finally {
     await session.endSession();
   }

@@ -13,7 +13,12 @@ export async function getWatchlists(req: Request, res: Response): Promise<void> 
   res.status(200).json({ success: true, watchlists });
 }
 
-/** Create a new named watchlist (capped at MAX_WATCHLISTS). */
+/**
+ * Create a new named watchlist (capped at MAX_WATCHLISTS).
+ * Best-effort cap: the count check and the create aren't atomic, so two
+ * concurrent requests right at the limit could land one over. Not worth an
+ * atomic guard for a soft UI limit with no financial-integrity impact.
+ */
 export async function createWatchlist(req: Request, res: Response): Promise<void> {
   const { name, color } = req.body as { name: string; color?: string };
 
@@ -164,8 +169,19 @@ export async function updatePrices(req: Request, res: Response): Promise<void> {
     prices: { symbol: string; exchange?: string; price: number }[];
   };
 
-  const bySymbol = new Map<string, number>();
-  for (const p of prices) bySymbol.set(p.symbol.toUpperCase(), p.price);
+  // Prefer an exact symbol+exchange match (NSE:RELIANCE and BSE:RELIANCE are
+  // different listings, often at different prices). Fall back to symbol-only
+  // for callers that don't disambiguate exchange.
+  const bySymbolExchange = new Map<string, number>();
+  const bySymbolOnly = new Map<string, number>();
+  for (const p of prices) {
+    const symbol = p.symbol.toUpperCase();
+    if (p.exchange) {
+      bySymbolExchange.set(`${symbol}:${p.exchange.toUpperCase()}`, p.price);
+    } else {
+      bySymbolOnly.set(symbol, p.price);
+    }
+  }
 
   const watchlists = await Watchlist.find({ userId: req.userId });
   const now = new Date();
@@ -174,7 +190,10 @@ export async function updatePrices(req: Request, res: Response): Promise<void> {
   for (const wl of watchlists) {
     let dirty = false;
     for (const item of wl.items) {
-      const price = bySymbol.get(item.symbol.toUpperCase());
+      const symbol = item.symbol.toUpperCase();
+      const price =
+        bySymbolExchange.get(`${symbol}:${item.exchange.toUpperCase()}`) ??
+        bySymbolOnly.get(symbol);
       if (price !== undefined) {
         item.lastPrice = price;
         item.lastPriceAt = now;

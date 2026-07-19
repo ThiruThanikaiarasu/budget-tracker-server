@@ -2,8 +2,43 @@ import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Transaction } from "../models/Transaction.js";
 import { Account } from "../models/Account.js";
+import { Category } from "../models/Category.js";
 import { SharedExpense } from "../models/SharedExpense.js";
 import { Friend } from "../models/Friend.js";
+
+/**
+ * Validate that accountId / toAccountId / categoryId (whichever are present)
+ * belong to this user before they're used to move a balance or get stored.
+ * Without this, any authenticated user could pass another user's account or
+ * category id and mutate/reference data outside their own account.
+ */
+async function validateOwnedRefs(
+  userId: string,
+  refs: { accountId?: string; toAccountId?: string; categoryId?: string }
+): Promise<string | null> {
+  const { accountId, toAccountId, categoryId } = refs;
+
+  const accountIds = [accountId, toAccountId].filter(
+    (id): id is string => !!id
+  );
+  if (accountIds.length > 0) {
+    const count = await Account.countDocuments({
+      _id: { $in: accountIds },
+      userId,
+    });
+    if (count !== new Set(accountIds).size) return "Account not found.";
+  }
+
+  if (categoryId) {
+    const category = await Category.findOne({
+      _id: categoryId,
+      $or: [{ userId }, { userId: null }], // null = shared default category
+    });
+    if (!category) return "Category not found.";
+  }
+
+  return null;
+}
 
 async function applyBalanceEffect(
   type: string,
@@ -72,6 +107,16 @@ export async function createTransaction(
     }
   }
 
+  const refError = await validateOwnedRefs(req.userId!, {
+    accountId,
+    toAccountId,
+    categoryId,
+  });
+  if (refError) {
+    res.status(400).json({ success: false, message: refError });
+    return;
+  }
+
   const session = await mongoose.startSession();
   try {
     let transaction: InstanceType<typeof Transaction> | null = null;
@@ -85,6 +130,13 @@ export async function createTransaction(
         (sum: number, s: { amount: number }) => sum + s.amount,
         0
       );
+      if (splitTotal > amount) {
+        res.status(400).json({
+          success: false,
+          message: "Split amounts exceed total amount.",
+        });
+        return;
+      }
       personalShare = Math.round((amount - splitTotal) * 100) / 100;
     }
 
@@ -146,9 +198,6 @@ export async function createTransaction(
       .populate("accountId", "name")
       .populate("toAccountId", "name")
       .populate("paidByFriendId", "name");
-
-    console.log("[CREATE] saved paidByFriendId:", transaction!.paidByFriendId);
-    console.log("[CREATE] populated paidByFriendId:", (populated as any)?.paidByFriendId);
 
     res.status(201).json({ success: true, transaction: populated });
   } finally {
@@ -301,6 +350,16 @@ export async function updateTransaction(
     }
   }
 
+  const refError = await validateOwnedRefs(req.userId!, {
+    accountId,
+    toAccountId,
+    categoryId,
+  });
+  if (refError) {
+    res.status(400).json({ success: false, message: refError });
+    return;
+  }
+
   // When split, only the user's own share counts toward the budget.
   let personalShare: number | undefined;
   if (splits && splits.length > 0) {
@@ -433,11 +492,19 @@ export async function cleanupAccounts(
     req.body;
 
   const accountIds = balances.map((b) => b.accountId);
+  if (new Set(accountIds).size !== accountIds.length) {
+    res.status(400).json({
+      success: false,
+      message: "Duplicate accountId in balances.",
+    });
+    return;
+  }
+
   const accounts = await Account.find({
     _id: { $in: accountIds },
     userId: req.userId,
   });
-  if (accounts.length !== new Set(accountIds).size) {
+  if (accounts.length !== accountIds.length) {
     res
       .status(404)
       .json({ success: false, message: "One or more accounts not found." });

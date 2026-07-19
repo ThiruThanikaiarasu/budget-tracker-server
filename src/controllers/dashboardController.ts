@@ -4,6 +4,7 @@ import { Transaction } from "../models/Transaction.js";
 import {
   getFinancialMonthRange,
   getCurrentFinancialMonth,
+  getFinancialMonthForDate,
   getUserStartDay,
 } from "../utils/financialMonth.js";
 
@@ -111,55 +112,58 @@ export async function getMonthlyTrend(
 ): Promise<void> {
   const userId = new mongoose.Types.ObjectId(req.userId);
   const months = Math.max(1, Math.min(24, parseInt(req.query.months as string, 10) || 6));
+  const startDay = await getUserStartDay(req.userId!);
 
-  const now = new Date();
-  const startDate = new Date(now.getFullYear(), now.getMonth() - months + 1, 1);
-
-  const result = await Transaction.aggregate([
-    {
-      $match: {
-        userId,
-        type: { $in: ["income", "expense"] },
-        isAdjustment: { $ne: true },
-        date: { $gte: startDate },
-      },
-    },
-    {
-      $group: {
-        _id: {
-          year: { $year: "$date" },
-          month: { $month: "$date" },
-          type: "$type",
-        },
-        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
-      },
-    },
-  ]);
-
-  const trendMap = new Map<string, { income: number; expense: number }>();
-
+  // Build the trailing `months` financial-month labels (oldest first), walking
+  // back from the user's current financial month — not calendar months, so
+  // this lines up with every other budget/summary endpoint for users with a
+  // custom financialMonthStartDay.
+  const currentMonth = getCurrentFinancialMonth(startDay);
+  const [curYear, curM] = currentMonth.split("-").map(Number);
+  const monthLabels: string[] = [];
+  let y = curYear;
+  let m = curM;
   for (let i = 0; i < months; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() - months + 1 + i, 1);
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    trendMap.set(key, { income: 0, expense: 0 });
-  }
-
-  for (const item of result) {
-    const key = `${item._id.year}-${String(item._id.month).padStart(2, "0")}`;
-    const entry = trendMap.get(key);
-    if (entry) {
-      if (item._id.type === "income") entry.income = item.total;
-      if (item._id.type === "expense") entry.expense = item.total;
+    monthLabels.unshift(`${y}-${String(m).padStart(2, "0")}`);
+    m -= 1;
+    if (m < 1) {
+      m = 12;
+      y -= 1;
     }
   }
 
-  const trend = Array.from(trendMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, data]) => ({
-      month,
-      income: data.income,
-      expense: data.expense,
-    }));
+  const earliestStart = getFinancialMonthRange(monthLabels[0], startDay).start;
+
+  // Bucketing by financial month can't be expressed as a plain $year/$month
+  // group (the day-shift/short-month clamping isn't a fixed calendar rule),
+  // so pull the raw fields and bucket with the same helper every other
+  // endpoint uses, keeping one source of truth for "which month is this in".
+  const transactions = await Transaction.find({
+    userId,
+    type: { $in: ["income", "expense"] },
+    isAdjustment: { $ne: true },
+    date: { $gte: earliestStart },
+  })
+    .select("date type amount personalShare")
+    .lean();
+
+  const trendMap = new Map<string, { income: number; expense: number }>();
+  for (const label of monthLabels) trendMap.set(label, { income: 0, expense: 0 });
+
+  for (const tx of transactions) {
+    const label = getFinancialMonthForDate(tx.date, startDay);
+    const entry = trendMap.get(label);
+    if (!entry) continue; // outside the requested window
+    const amount = tx.personalShare ?? tx.amount;
+    if (tx.type === "income") entry.income += amount;
+    else if (tx.type === "expense") entry.expense += amount;
+  }
+
+  const trend = monthLabels.map((month) => ({
+    month,
+    income: trendMap.get(month)!.income,
+    expense: trendMap.get(month)!.expense,
+  }));
 
   res.status(200).json({ success: true, trend });
 }

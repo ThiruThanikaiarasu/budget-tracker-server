@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { validate } from "../middlewares/validate.js";
 import { authenticate } from "../middlewares/auth.js";
+import { dateString } from "../utils/zodDate.js";
 import {
   createSharedExpense,
   getSharedExpenses,
@@ -14,7 +15,7 @@ const createSchema = z.object({
   description: z.string().min(1),
   totalAmount: z.number().positive(),
   paidBy: z.string().min(1),
-  date: z.string().optional(),
+  date: dateString.optional(),
   splits: z
     .array(
       z.object({

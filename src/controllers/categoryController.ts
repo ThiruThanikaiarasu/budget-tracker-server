@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Category } from "../models/Category.js";
 import { User } from "../models/User.js";
+import { Transaction } from "../models/Transaction.js";
 
 export async function getCategories(
   req: Request,
@@ -138,6 +139,18 @@ export async function deleteCategory(
     return;
   }
 
+  const usageCount = await Transaction.countDocuments({
+    userId: req.userId,
+    categoryId: category._id,
+  });
+  if (usageCount > 0) {
+    res.status(400).json({
+      success: false,
+      message: `Can't delete — ${usageCount} transaction${usageCount > 1 ? "s" : ""} use this category.`,
+    });
+    return;
+  }
+
   await category.deleteOne();
 
   await User.findByIdAndUpdate(req.userId, {
@@ -151,11 +164,23 @@ export async function reorderCategories(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { orderedIds } = req.body;
+  const { orderedIds }: { orderedIds: string[] } = req.body;
 
   const user = await User.findById(req.userId);
   if (!user) {
     res.status(404).json({ success: false, message: "User not found." });
+    return;
+  }
+
+  const visibleCount = await Category.countDocuments({
+    _id: { $in: orderedIds },
+    $or: [{ userId: req.userId }, { userId: null }],
+  });
+  if (visibleCount !== new Set(orderedIds).size) {
+    res.status(400).json({
+      success: false,
+      message: "One or more categories are invalid.",
+    });
     return;
   }
 

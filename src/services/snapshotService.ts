@@ -5,12 +5,7 @@ import {
   type SnapshotCadence,
   type ISnapshotHolding,
 } from "../models/PortfolioSnapshot.js";
-
-function startOfDay(d: Date): Date {
-  const copy = new Date(d);
-  copy.setHours(0, 0, 0, 0);
-  return copy;
-}
+import { startOfISTDay } from "../utils/financialMonth.js";
 
 interface SnapshotOptions {
   benchmarkSymbol?: string;
@@ -42,7 +37,7 @@ export async function createSnapshotForUser(
   const totalInvested = holdings.reduce((s, h) => s + h.invested, 0);
   const totalCurrent = holdings.reduce((s, h) => s + h.current, 0);
 
-  const day = startOfDay(opts.date ?? new Date());
+  const day = startOfISTDay(opts.date ?? new Date());
 
   const fields = {
     userId,

@@ -13,6 +13,9 @@ import {
   getDaysLeftInPeriod,
   getUserStartDay,
   buildPeriodDays,
+  startOfISTDay,
+  endOfISTDay,
+  formatISTDateStr,
 } from "../utils/financialMonth.js";
 
 export async function upsertBudget(
@@ -62,9 +65,6 @@ export async function getBudget(
   res.status(200).json({ success: true, budget });
 }
 
-function formatDateStr(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 /**
  * Computes the carry-forward pot for a category across all months up to currentMonth.
@@ -147,8 +147,8 @@ export async function precheck(
   }
 
   const today = new Date();
-  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+  const startOfToday = startOfISTDay(today);
+  const endOfToday = endOfISTDay(today);
 
   const warnings: string[] = [];
 
@@ -416,7 +416,7 @@ export async function getMonthlySummary(
     summary: {
       month,
       daysInPeriod,
-      periodStart: formatDateStr(start),
+      periodStart: formatISTDateStr(start),
       overallLimit: budget?.overallLimit || null,
       totalBudget,
       dailyLimit,
@@ -437,20 +437,8 @@ export async function getTodaySummary(
   const { start, end, daysInPeriod } = getFinancialMonthRange(month, startDay);
 
   const today = new Date();
-  const startOfToday = new Date(
-    today.getFullYear(),
-    today.getMonth(),
-    today.getDate()
-  );
-  const endOfToday = new Date(
-    today.getFullYear(),
-    today.getMonth(),
-    today.getDate(),
-    23,
-    59,
-    59,
-    999
-  );
+  const startOfToday = startOfISTDay(today);
+  const endOfToday = endOfISTDay(today);
 
   const budget = await Budget.findOne({ userId: req.userId, month }).populate(
     "categoryBudgets.categoryId",

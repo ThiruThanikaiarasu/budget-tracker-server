@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { validate } from "../middlewares/validate.js";
 import { authenticate } from "../middlewares/auth.js";
+import { dateString } from "../utils/zodDate.js";
 import {
   createTransaction,
   getTransactions,
@@ -11,14 +12,18 @@ import {
   cleanupAccounts,
 } from "../controllers/transactionController.js";
 
+// "transfer" is deliberately excluded — transfers must go through POST /transfers,
+// which validates ownership, active status, and sufficient balance on both
+// accounts. The client never sends type: "transfer" here (its transaction
+// form only offers income/expense, and edit is disabled for transfers).
 const transactionSchema = z.object({
-  type: z.enum(["income", "expense", "transfer"]),
+  type: z.enum(["income", "expense"]),
   amount: z.number().positive(),
   categoryId: z.string().optional(),
   accountId: z.string().optional(),
   toAccountId: z.string().optional(),
   note: z.string().optional(),
-  date: z.string().min(1),
+  date: dateString,
   paidByFriendId: z.string().optional(),
   splits: z
     .array(

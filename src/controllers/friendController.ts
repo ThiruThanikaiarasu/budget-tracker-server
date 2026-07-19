@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { Friend } from "../models/Friend.js";
 import { SharedExpense } from "../models/SharedExpense.js";
+import { netBalanceContribution } from "../utils/friendBalance.js";
 import mongoose from "mongoose";
 
 export async function createFriend(
@@ -97,13 +98,8 @@ export async function updateFriend(
  * Calculate net balance with a friend.
  * Positive = friend owes user, Negative = user owes friend.
  *
- * Logic:
- * - If user paid: each friend's split amount is what they owe the user (+)
- * - If friend paid: the user's implied share is what the user owes that friend (-)
- *   The user's share = totalAmount - sum(all friend splits)
- *   But we only care about this specific friend, so:
- *   - If this friend paid: user owes their own share to this friend (-)
- *   - For splits where another friend paid: no effect on this friend's balance
+ * Per-expense math lives in utils/friendBalance.ts (shared with
+ * splitController.getBalances) so the two never drift apart.
  */
 async function calculateNetBalance(
   userId: string,
@@ -119,36 +115,8 @@ async function calculateNetBalance(
     ],
   });
 
-  let balance = 0;
-
-  for (const expense of expenses) {
-    const friendSplit = expense.splits.find(
-      (s) => s.friendId.toString() === friendId.toString()
-    );
-
-    if (expense.isSettlement) {
-      if (!friendSplit) continue;
-      if (expense.paidBy === "user") {
-        balance -= friendSplit.amount;
-      } else if (expense.paidBy.toString() === friendId.toString()) {
-        balance += friendSplit.amount;
-      }
-    } else {
-      if (expense.paidBy === "user") {
-        if (!friendSplit) continue;
-        balance += friendSplit.amount;
-      } else if (expense.paidBy.toString() === friendId.toString()) {
-        // Friend paid — user owes their share (total minus all friends' portions).
-        // When splits is empty the user owes the full amount.
-        const totalFriendSplits = expense.splits.reduce(
-          (sum, s) => sum + s.amount,
-          0
-        );
-        const userShare = expense.totalAmount - totalFriendSplits;
-        balance -= userShare;
-      }
-    }
-  }
-
-  return balance;
+  return expenses.reduce(
+    (balance, expense) => balance + netBalanceContribution(expense, friendId.toString()),
+    0
+  );
 }

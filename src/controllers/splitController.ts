@@ -5,6 +5,7 @@ import { Friend } from "../models/Friend.js";
 import { Account } from "../models/Account.js";
 import { Category } from "../models/Category.js";
 import { Transaction } from "../models/Transaction.js";
+import { netBalanceContribution } from "../utils/friendBalance.js";
 
 // Get an existing category by name+type for this user, or create it.
 async function getOrCreateCategory(
@@ -111,34 +112,11 @@ export async function getBalances(
   const expenses = await SharedExpense.find({ userId: req.userId });
 
   const balances = friends.map((friend) => {
-    let balance = 0;
-
-    for (const expense of expenses) {
-      const friendSplit = expense.splits.find(
-        (s) => s.friendId.toString() === friend._id!.toString()
-      );
-
-      if (expense.isSettlement) {
-        if (!friendSplit) continue;
-        if (expense.paidBy === "user") {
-          balance -= friendSplit.amount;
-        } else if (expense.paidBy.toString() === friend._id!.toString()) {
-          balance += friendSplit.amount;
-        }
-      } else {
-        if (expense.paidBy === "user") {
-          if (!friendSplit) continue;
-          balance += friendSplit.amount;
-        } else if (expense.paidBy.toString() === friend._id!.toString()) {
-          const totalFriendSplits = expense.splits.reduce(
-            (sum, s) => sum + s.amount,
-            0
-          );
-          const userShare = expense.totalAmount - totalFriendSplits;
-          balance -= userShare;
-        }
-      }
-    }
+    const friendId = friend._id!.toString();
+    const balance = expenses.reduce(
+      (sum, expense) => sum + netBalanceContribution(expense, friendId),
+      0
+    );
 
     return {
       friendId: friend._id,
@@ -197,7 +175,10 @@ export async function settleUp(
     }
   }
 
-  // Validate that any covered expenses belong to this user and this friend.
+  // Validate that any covered expenses belong to this user and this friend,
+  // and that the submitted amount actually matches what's outstanding on
+  // them — the client computes `amount`/`friendOwes` independently, and
+  // without this check a client bug could silently move the wrong amount.
   let coveredIds: mongoose.Types.ObjectId[] = [];
   if (coveredExpenseIds && coveredExpenseIds.length > 0) {
     const covered = await SharedExpense.find({
@@ -205,7 +186,7 @@ export async function settleUp(
       userId: req.userId,
       isSettlement: false,
       $or: [{ "splits.friendId": friendId }, { paidBy: friendId }],
-    }).select("_id");
+    }).select("_id paidBy splits totalAmount isSettlement");
     if (covered.length !== coveredExpenseIds.length) {
       res.status(400).json({
         success: false,
@@ -214,87 +195,135 @@ export async function settleUp(
       return;
     }
     coveredIds = covered.map((c) => c._id as mongoose.Types.ObjectId);
+
+    // Signed outstanding share per expense: positive = friend owes user,
+    // negative = user owes friend. Same shared math as calculateNetBalance/
+    // getBalances (none of `covered` are settlements, so only that branch runs).
+    const expectedSigned = covered.reduce(
+      (sum, e) => sum + netBalanceContribution(e, friendId),
+      0
+    );
+    const submittedSigned = friendOwes ? amount : -amount;
+    if (Math.abs(expectedSigned - submittedSigned) > 0.01) {
+      res.status(400).json({
+        success: false,
+        message: "Settlement amount doesn't match the selected expenses.",
+      });
+      return;
+    }
   }
 
   const now = new Date();
 
-  // The settlement SharedExpense cancels the debt in the balance math. Its
-  // direction is set by paidBy: "user" reduces what the friend owes you,
-  // the friendId reduces what you owe the friend.
-  const settlement = await SharedExpense.create({
-    userId: req.userId,
-    description: `Settlement with ${friend.name}`,
-    totalAmount: amount,
-    paidBy: friendOwes ? "user" : friendId,
-    date: now,
-    splits: [{ friendId, amount }],
-    isSettlement: true,
-    settlementMethod: method,
-    coveredExpenseIds: coveredIds,
-  });
+  const session = await mongoose.startSession();
+  let settlement: InstanceType<typeof SharedExpense> | null = null;
+  try {
+    await session.withTransaction(async () => {
+      // The settlement SharedExpense cancels the debt in the balance math.
+      // Its direction is set by paidBy: "user" reduces what the friend owes
+      // you, the friendId reduces what you owe the friend.
+      const docs = await SharedExpense.create(
+        [
+          {
+            userId: req.userId,
+            description: `Settlement with ${friend.name}`,
+            totalAmount: amount,
+            paidBy: friendOwes ? "user" : friendId,
+            date: now,
+            splits: [{ friendId, amount }],
+            isSettlement: true,
+            settlementMethod: method,
+            coveredExpenseIds: coveredIds,
+          },
+        ],
+        { session }
+      );
+      settlement = docs[0];
 
-  // Reflect the real-world money movement as a Transaction (and account balance).
-  if (method === "received") {
-    // Friend paid you back — money lands in the chosen account.
-    const categoryId = await getOrCreateCategory(
-      req.userId!,
-      "Settlement",
-      "income"
-    );
-    await Transaction.create({
-      userId: req.userId,
-      type: "income",
-      amount,
-      categoryId,
-      accountId,
-      note: `Settlement from ${friend.name}`,
-      date: now,
+      // Reflect the real-world money movement as a Transaction (and account balance).
+      if (method === "received") {
+        // Friend paid you back — money lands in the chosen account.
+        const categoryId = await getOrCreateCategory(
+          req.userId!,
+          "Settlement",
+          "income"
+        );
+        await Transaction.create(
+          [
+            {
+              userId: req.userId,
+              type: "income",
+              amount,
+              categoryId,
+              accountId,
+              note: `Settlement from ${friend.name}`,
+              date: now,
+            },
+          ],
+          { session }
+        );
+        await Account.updateOne(
+          { _id: accountId, userId: req.userId },
+          { $inc: { balance: amount } },
+          { session }
+        );
+      } else if (method === "paid") {
+        // You paid the friend back — money leaves the chosen account.
+        const categoryId = await getOrCreateCategory(
+          req.userId!,
+          "Settlement",
+          "expense"
+        );
+        await Transaction.create(
+          [
+            {
+              userId: req.userId,
+              type: "expense",
+              amount,
+              categoryId,
+              accountId,
+              note: `Settlement to ${friend.name}`,
+              date: now,
+            },
+          ],
+          { session }
+        );
+        await Account.updateOne(
+          { _id: accountId, userId: req.userId },
+          { $inc: { balance: -amount } },
+          { session }
+        );
+      } else if (method === "waived" && friendOwes) {
+        // You forgave what the friend owed — you absorb it as your own spend.
+        // No account moves (the original bill already left your account);
+        // this is purely a budget/expense record.
+        const categoryId = await getOrCreateCategory(
+          req.userId!,
+          "Waived",
+          "expense"
+        );
+        await Transaction.create(
+          [
+            {
+              userId: req.userId,
+              type: "expense",
+              amount,
+              categoryId,
+              personalShare: amount,
+              note: `Waived debt for ${friend.name}`,
+              date: now,
+            },
+          ],
+          { session }
+        );
+      }
+      // method === "waived" && !friendOwes: the friend forgave your debt.
+      // Nothing moves and it isn't your income; the settlement record alone
+      // clears it.
     });
-    await Account.updateOne(
-      { _id: accountId, userId: req.userId },
-      { $inc: { balance: amount } }
-    );
-  } else if (method === "paid") {
-    // You paid the friend back — money leaves the chosen account.
-    const categoryId = await getOrCreateCategory(
-      req.userId!,
-      "Settlement",
-      "expense"
-    );
-    await Transaction.create({
-      userId: req.userId,
-      type: "expense",
-      amount,
-      categoryId,
-      accountId,
-      note: `Settlement to ${friend.name}`,
-      date: now,
-    });
-    await Account.updateOne(
-      { _id: accountId, userId: req.userId },
-      { $inc: { balance: -amount } }
-    );
-  } else if (method === "waived" && friendOwes) {
-    // You forgave what the friend owed — you absorb it as your own spend.
-    // No account moves (the original bill already left your account); this is
-    // purely a budget/expense record.
-    const categoryId = await getOrCreateCategory(
-      req.userId!,
-      "Waived",
-      "expense"
-    );
-    await Transaction.create({
-      userId: req.userId,
-      type: "expense",
-      amount,
-      categoryId,
-      personalShare: amount,
-      note: `Waived debt for ${friend.name}`,
-      date: now,
-    });
+  } finally {
+    await session.endSession();
   }
-  // method === "waived" && !friendOwes: the friend forgave your debt. Nothing
-  // moves and it isn't your income; the settlement record alone clears it.
 
   res.status(201).json({ success: true, settlement });
 }
@@ -303,7 +332,7 @@ export async function deleteSharedExpense(
   req: Request,
   res: Response
 ): Promise<void> {
-  const expense = await SharedExpense.findOneAndDelete({
+  const expense = await SharedExpense.findOne({
     _id: req.params.id,
     userId: req.userId,
   });
@@ -314,6 +343,40 @@ export async function deleteSharedExpense(
       message: "Shared expense not found.",
     });
     return;
+  }
+
+  // Settlements move real money (see settleUp) via a separate Transaction /
+  // account-balance change that isn't linked back to this record, so deleting
+  // it here would silently desync the friend balance from the account balance
+  // with no way to reverse it. Not currently exposed in the UI either way.
+  if (expense.isSettlement) {
+    res.status(400).json({
+      success: false,
+      message: "Settlements can't be deleted.",
+    });
+    return;
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await SharedExpense.deleteOne({ _id: expense._id }, { session });
+
+      // If this split came from a regular Transaction (has transactionId),
+      // that Transaction's personalShare still reflects the now-deleted
+      // split. Reset it so the full amount counts toward the budget again —
+      // mirrors what updateTransaction already does when a split is removed
+      // via the edit form.
+      if (expense.transactionId) {
+        await Transaction.updateOne(
+          { _id: expense.transactionId, userId: req.userId },
+          { $unset: { personalShare: "" } },
+          { session }
+        );
+      }
+    });
+  } finally {
+    await session.endSession();
   }
 
   res.status(200).json({ success: true, message: "Shared expense deleted." });
