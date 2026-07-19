@@ -205,22 +205,13 @@ export async function createTransaction(
   }
 }
 
-export async function getTransactions(
-  req: Request,
-  res: Response
-): Promise<void> {
-  const {
-    dateFrom,
-    dateTo,
-    type,
-    categoryId,
-    accountId,
-    page: pageStr,
-    limit: limitStr,
-  } = req.query;
-
-  const page = Math.max(1, parseInt(pageStr as string, 10) || 1);
-  const limit = Math.max(1, Math.min(100, parseInt(limitStr as string, 10) || 20));
+/**
+ * Same filter-building rules getTransactions uses (userId, type, category,
+ * account, date range) — shared with getTransactionsSummary so the summary
+ * total always matches exactly what the paginated list is scoped to.
+ */
+function buildTransactionFilter(req: Request): Record<string, unknown> {
+  const { dateFrom, dateTo, type, categoryId, accountId } = req.query;
 
   const filter: Record<string, unknown> = { userId: req.userId };
 
@@ -234,6 +225,20 @@ export async function getTransactions(
     if (dateTo) dateFilter.$lte = new Date(dateTo as string);
     filter.date = dateFilter;
   }
+
+  return filter;
+}
+
+export async function getTransactions(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const { page: pageStr, limit: limitStr } = req.query;
+
+  const page = Math.max(1, parseInt(pageStr as string, 10) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(limitStr as string, 10) || 20));
+
+  const filter = buildTransactionFilter(req);
 
   const [transactions, total] = await Promise.all([
     Transaction.find(filter)
@@ -274,6 +279,45 @@ export async function getTransactions(
       total,
       pages: Math.ceil(total / limit),
     },
+  });
+}
+
+/**
+ * Income/expense totals for the same filter getTransactions uses — computed
+ * once server-side across ALL matching documents, not just the page(s) the
+ * client happens to have loaded via infinite scroll. Clean-up adjustment
+ * entries (isAdjustment) are excluded, matching the dashboard summary's rule.
+ */
+export async function getTransactionsSummary(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const filter = buildTransactionFilter(req);
+  filter.type = filter.type
+    ? filter.type
+    : { $in: ["income", "expense"] };
+  filter.isAdjustment = { $ne: true };
+
+  const result = await Transaction.aggregate([
+    { $match: filter },
+    {
+      $group: {
+        _id: "$type",
+        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
+      },
+    },
+  ]);
+
+  let totalIncome = 0;
+  let totalExpense = 0;
+  for (const item of result) {
+    if (item._id === "income") totalIncome = item.total;
+    if (item._id === "expense") totalExpense = item.total;
+  }
+
+  res.status(200).json({
+    success: true,
+    summary: { totalIncome, totalExpense, net: totalIncome - totalExpense },
   });
 }
 

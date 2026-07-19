@@ -6,6 +6,7 @@ import { dateString } from "../utils/zodDate.js";
 import {
   createTransaction,
   getTransactions,
+  getTransactionsSummary,
   getTransaction,
   updateTransaction,
   deleteTransaction,
@@ -53,6 +54,7 @@ router.use(authenticate);
 router.post("/cleanup", validate(cleanupSchema), cleanupAccounts);
 router.post("/", validate(transactionSchema), createTransaction);
 router.get("/", getTransactions);
+router.get("/summary", getTransactionsSummary);
 router.get("/:id", getTransaction);
 router.put("/:id", validate(transactionSchema), updateTransaction);
 router.delete("/:id", deleteTransaction);
