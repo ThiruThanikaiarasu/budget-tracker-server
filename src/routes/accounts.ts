@@ -10,7 +10,7 @@ import {
   toggleAccount,
 } from "../controllers/accountController.js";
 
-const accountTypes = ["cash", "bank_account", "credit_card", "upi_wallet", "other"] as const;
+const accountTypes = ["cash", "bank_account", "credit_card", "upi_wallet", "investment", "other"] as const;
 
 const createSchema = z.object({
   name: z.string().min(1),
