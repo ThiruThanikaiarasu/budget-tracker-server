@@ -98,6 +98,11 @@ export async function getSharedExpenses(
   }
 
   const expenses = await SharedExpense.find(filter)
+    .populate({
+      path: "transactionId",
+      select: "categoryId",
+      populate: { path: "categoryId", select: "name icon" },
+    })
     .populate("splits.friendId", "name")
     .sort({ date: -1 });
 
