@@ -199,7 +199,21 @@ export async function createTransaction(
       .populate("toAccountId", "name")
       .populate("paidByFriendId", "name");
 
-    res.status(201).json({ success: true, transaction: populated });
+    // Attach the linked split so the freshly-created transaction the client
+    // stores carries the same shape as the list/single/update responses.
+    // Without this, editing a just-created split transaction prefills "Split: No"
+    // and a subsequent save drops the SharedExpense (data loss).
+    const split = await SharedExpense.findOne({
+      transactionId: transaction!._id,
+      isSettlement: false,
+    })
+      .select("paidBy splits")
+      .populate("splits.friendId", "name");
+
+    res.status(201).json({
+      success: true,
+      transaction: { ...populated!.toObject(), split: split ?? null },
+    });
   } finally {
     await session.endSession();
   }
@@ -210,8 +224,10 @@ export async function createTransaction(
  * account, date range) — shared with getTransactionsSummary so the summary
  * total always matches exactly what the paginated list is scoped to.
  */
-function buildTransactionFilter(req: Request): Record<string, unknown> {
-  const { dateFrom, dateTo, type, categoryId, accountId } = req.query;
+async function buildTransactionFilter(
+  req: Request
+): Promise<Record<string, unknown>> {
+  const { dateFrom, dateTo, type, categoryId, accountId, search } = req.query;
 
   const filter: Record<string, unknown> = { userId: req.userId };
 
@@ -226,6 +242,41 @@ function buildTransactionFilter(req: Request): Record<string, unknown> {
     filter.date = dateFilter;
   }
 
+  // Free-text search across note, category name and amount. It's ANDed with
+  // the date window above, so it only ever searches the month currently in
+  // view — the client always passes the viewed month's dateFrom/dateTo.
+  const term = typeof search === "string" ? search.trim() : "";
+  if (term) {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rx = new RegExp(escaped, "i");
+
+    // A transaction stores only a categoryId ref, so "by category" means
+    // matching the category's name — resolve matching ids for this user first.
+    const matchingCategories = await Category.find({
+      userId: req.userId,
+      name: rx,
+    }).select("_id");
+
+    const or: Record<string, unknown>[] = [{ note: rx }];
+    if (matchingCategories.length) {
+      or.push({ categoryId: { $in: matchingCategories.map((c) => c._id) } });
+    }
+    // "Contains" match on the amount's digits (e.g. "50" hits 50, 500, 1500).
+    if (/\d/.test(term)) {
+      or.push({
+        $expr: {
+          $regexMatch: {
+            input: { $toString: "$amount" },
+            regex: escaped,
+            options: "i",
+          },
+        },
+      });
+    }
+
+    filter.$or = or;
+  }
+
   return filter;
 }
 
@@ -238,7 +289,7 @@ export async function getTransactions(
   const page = Math.max(1, parseInt(pageStr as string, 10) || 1);
   const limit = Math.max(1, Math.min(100, parseInt(limitStr as string, 10) || 20));
 
-  const filter = buildTransactionFilter(req);
+  const filter = await buildTransactionFilter(req);
 
   const [transactions, total] = await Promise.all([
     Transaction.find(filter)
@@ -292,7 +343,7 @@ export async function getTransactionsSummary(
   req: Request,
   res: Response
 ): Promise<void> {
-  const filter = buildTransactionFilter(req);
+  const filter = await buildTransactionFilter(req);
   filter.type = filter.type
     ? filter.type
     : { $in: ["income", "expense"] };
