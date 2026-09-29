@@ -204,6 +204,30 @@ export async function createTransaction(
           { session }
         );
       }
+
+      // Income tagged with a friend is money they sent directly — treat it
+      // like a Settle Up "received": it cancels what the friend owes (or, if
+      // they didn't owe anything, flips the balance so the user now owes
+      // them), so it shows up in the friend's balance/history same as a
+      // settlement would.
+      if (type === "income" && receivedFromFriendId) {
+        await SharedExpense.create(
+          [
+            {
+              userId: req.userId,
+              transactionId: transaction._id,
+              description: note || "Money received",
+              totalAmount: amount,
+              paidBy: "user",
+              date: new Date(date),
+              splits: [{ friendId: receivedFromFriendId, amount }],
+              isSettlement: true,
+              settlementMethod: "received",
+            },
+          ],
+          { session }
+        );
+      }
     });
 
     const populated = await Transaction.findById(transaction!._id)
@@ -577,6 +601,45 @@ export async function updateTransaction(
           { session }
         );
       }
+
+      // Keep the linked "received from friend" settlement in sync too.
+      const existingReceivedLink = await SharedExpense.findOne({
+        transactionId: existing._id,
+        isSettlement: true,
+      }).session(session);
+
+      if (type === "income" && receivedFromFriendId) {
+        if (existingReceivedLink) {
+          existingReceivedLink.description = note || "Money received";
+          existingReceivedLink.totalAmount = amount;
+          existingReceivedLink.date = new Date(date);
+          existingReceivedLink.splits = [{ friendId: receivedFromFriendId, amount }];
+          await existingReceivedLink.save({ session });
+        } else {
+          await SharedExpense.create(
+            [
+              {
+                userId: req.userId,
+                transactionId: existing._id,
+                description: note || "Money received",
+                totalAmount: amount,
+                paidBy: "user",
+                date: new Date(date),
+                splits: [{ friendId: receivedFromFriendId, amount }],
+                isSettlement: true,
+                settlementMethod: "received",
+              },
+            ],
+            { session }
+          );
+        }
+      } else if (existingReceivedLink) {
+        // Friend tag was removed on edit — drop the now-orphaned settlement
+        await SharedExpense.deleteOne(
+          { _id: existingReceivedLink._id },
+          { session }
+        );
+      }
     });
 
     const populated = await Transaction.findById(existing._id)
@@ -712,9 +775,10 @@ export async function deleteTransaction(
 
       await Transaction.deleteOne({ _id: existing._id }, { session });
 
-      // Remove the linked split, if any, so it doesn't orphan
+      // Remove the linked split or "received from friend" settlement, if
+      // any, so it doesn't orphan (a transaction only ever links to one).
       await SharedExpense.deleteOne(
-        { transactionId: existing._id, isSettlement: false },
+        { transactionId: existing._id },
         { session }
       );
     });
