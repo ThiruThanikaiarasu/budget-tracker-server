@@ -3,6 +3,7 @@ import path from "path";
 import { connectDB } from "../config/db.js";
 import { User } from "../models/User.js";
 import { Investment, type InvestmentType, type Exchange } from "../models/Investment.js";
+import { Account } from "../models/Account.js";
 import { createSnapshotForUser } from "../services/snapshotService.js";
 
 /**
@@ -15,6 +16,7 @@ import { createSnapshotForUser } from "../services/snapshotService.js";
  *   {
  *     "fetchedAt": "2026-07-17T...",
  *     "niftyLevel": 24680.9,
+ *     "cashBalance": 2299.6,   // optional: Zerodha uninvested cash → CASH_ACCOUNT
  *     "holdings": [
  *       { "type": "stocks", "symbol": "SBIN", "exchange": "BSE", "name": "...",
  *         "sector": "Financial Services", "quantity": 2, "avgBuyPrice": 949.6,
@@ -22,15 +24,28 @@ import { createSnapshotForUser } from "../services/snapshotService.js";
  *     ]
  *   }
  *
+ * When `cashBalance` is present, the app Account of type "investment" named
+ * CASH_ACCOUNT (default "Zerodha", override with --cash-account=) is set to it,
+ * so the cash account + holdings tally to the true Zerodha value. This runs as
+ * part of a normal sync; use --cash-only to update JUST the cash (no holdings,
+ * no snapshot).
+ *
  * Usage:
  *   npx tsx src/scripts/syncZerodha.ts --email=you@mail.com                 # dry-run
  *   npx tsx src/scripts/syncZerodha.ts --email=you@mail.com --apply         # apply
+ *   npx tsx src/scripts/syncZerodha.ts --email=you@mail.com --cash-only --apply
  *   npx tsx src/scripts/syncZerodha.ts --email=you@mail.com --file=path.json
  */
 
 const APPLY = process.argv.includes("--apply");
+// Cash-only mode: reconcile the Zerodha cash account from payload.cashBalance
+// WITHOUT touching holdings or taking a snapshot (holdings/prices unchanged).
+const CASH_ONLY = process.argv.includes("--cash-only");
 const emailArg = process.argv.find((a) => a.startsWith("--email="));
 const fileArg = process.argv.find((a) => a.startsWith("--file="));
+const cashAccountArg = process.argv.find((a) => a.startsWith("--cash-account="));
+// The app Account (type "investment") that mirrors Zerodha's uninvested cash.
+const CASH_ACCOUNT = cashAccountArg ? cashAccountArg.split("=")[1] : "Zerodha";
 const EMAIL = emailArg ? emailArg.split("=")[1] : "";
 const FILE = fileArg
   ? fileArg.split("=")[1]
@@ -49,6 +64,10 @@ interface PayloadHolding {
 interface Payload {
   fetchedAt?: string;
   niftyLevel?: number;
+  // Zerodha's live uninvested cash (equity available.cash from get_margins).
+  // When present, the CASH_ACCOUNT balance is set to this so account + holdings
+  // tally to the true Zerodha value without double-counting.
+  cashBalance?: number;
   holdings: PayloadHolding[];
 }
 
@@ -76,15 +95,18 @@ async function run(): Promise<void> {
   }
 
   console.log(
-    `\n${APPLY ? "APPLY" : "DRY-RUN"} — syncing ${payload.holdings.length} holdings for ${EMAIL}` +
-      (payload.niftyLevel ? ` · NIFTY 50 ${payload.niftyLevel}` : " · no Nifty level") +
+    `\n${APPLY ? "APPLY" : "DRY-RUN"} — ${CASH_ONLY ? "cash-only" : `syncing ${payload.holdings.length} holdings`} for ${EMAIL}` +
+      (payload.cashBalance !== undefined ? ` · cash ${round2(payload.cashBalance)}` : "") +
+      (!CASH_ONLY ? (payload.niftyLevel ? ` · NIFTY 50 ${payload.niftyLevel}` : " · no Nifty level") : "") +
       "\n"
   );
 
   let created = 0;
   let updated = 0;
 
-  for (const h of payload.holdings) {
+  // Skip holdings entirely in cash-only mode.
+  const holdings = CASH_ONLY ? [] : payload.holdings;
+  for (const h of holdings) {
     const amountInvested = round2(h.quantity * h.avgBuyPrice);
     const currentValue = round2(h.quantity * h.currentPrice);
 
@@ -123,17 +145,47 @@ async function run(): Promise<void> {
     }
   }
 
-  if (APPLY) {
-    const snap = await createSnapshotForUser(user._id, "manual", {
-      benchmarkSymbol: payload.niftyLevel ? "NIFTY 50" : undefined,
-      benchmarkLevel: payload.niftyLevel,
+  // Reconcile the Zerodha cash account: its balance should mirror Zerodha's
+  // uninvested cash, so account + holdings tally to the true portfolio value.
+  if (payload.cashBalance !== undefined) {
+    const cashBalance = round2(payload.cashBalance);
+    const cashAccount = await Account.findOne({
+      userId: user._id,
+      type: "investment",
+      name: CASH_ACCOUNT,
     });
-    console.log(
-      `\nDone. Created ${created}, updated ${updated}. Snapshot ${snap._id} ` +
-        `(value ${snap.totalCurrent}${payload.niftyLevel ? `, Nifty ${payload.niftyLevel}` : ""}).\n`
-    );
+    if (!cashAccount) {
+      console.log(
+        `\n  ⚠ CASH account "${CASH_ACCOUNT}" (type investment) not found — skipping cash update.`
+      );
+    } else {
+      console.log(
+        `\n  CASH   ${CASH_ACCOUNT.padEnd(33)} ${cashAccount.balance} → ${cashBalance}`
+      );
+      if (APPLY) {
+        cashAccount.balance = cashBalance;
+        await cashAccount.save();
+      }
+    }
+  }
+
+  if (APPLY) {
+    let snapMsg = "";
+    // The snapshot captures holdings value; skip it in cash-only mode.
+    if (!CASH_ONLY) {
+      const snap = await createSnapshotForUser(user._id, "manual", {
+        benchmarkSymbol: payload.niftyLevel ? "NIFTY 50" : undefined,
+        benchmarkLevel: payload.niftyLevel,
+      });
+      snapMsg =
+        ` Snapshot ${snap._id} (value ${snap.totalCurrent}` +
+        `${payload.niftyLevel ? `, Nifty ${payload.niftyLevel}` : ""}).`;
+    }
+    console.log(`\nDone. Created ${created}, updated ${updated}.${snapMsg}\n`);
   } else {
-    console.log(`\nDry-run only. Re-run with --apply to write + snapshot.\n`);
+    console.log(
+      `\nDry-run only. Re-run with --apply to write${CASH_ONLY ? " cash" : " + snapshot"}.\n`
+    );
   }
 
   process.exit(0);

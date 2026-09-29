@@ -92,6 +92,7 @@ export async function createTransaction(
     note,
     date,
     paidByFriendId,
+    receivedFromFriendId,
     splits,
   } = req.body;
 
@@ -99,6 +100,17 @@ export async function createTransaction(
   if (paidByFriendId) {
     const friend = await Friend.findOne({
       _id: paidByFriendId,
+      userId: req.userId,
+    });
+    if (!friend) {
+      res.status(400).json({ success: false, message: "Friend not found." });
+      return;
+    }
+  }
+
+  if (receivedFromFriendId) {
+    const friend = await Friend.findOne({
+      _id: receivedFromFriendId,
       userId: req.userId,
     });
     if (!friend) {
@@ -163,6 +175,7 @@ export async function createTransaction(
             accountId: effectiveAccountId,
             toAccountId: toAccountId || undefined,
             paidByFriendId: paidByFriendId || undefined,
+            receivedFromFriendId: receivedFromFriendId || undefined,
             note: note ?? undefined,
             date: new Date(date),
           },
@@ -197,7 +210,8 @@ export async function createTransaction(
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
       .populate("toAccountId", "name")
-      .populate("paidByFriendId", "name");
+      .populate("paidByFriendId", "name")
+      .populate("receivedFromFriendId", "name");
 
     // Attach the linked split so the freshly-created transaction the client
     // stores carries the same shape as the list/single/update responses.
@@ -299,7 +313,8 @@ export async function getTransactions(
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
       .populate("toAccountId", "name")
-      .populate("paidByFriendId", "name"),
+      .populate("paidByFriendId", "name")
+      .populate("receivedFromFriendId", "name"),
     Transaction.countDocuments(filter),
   ]);
 
@@ -383,7 +398,8 @@ export async function getTransaction(
     .populate("categoryId", "name icon")
     .populate("accountId", "name")
     .populate("toAccountId", "name")
-    .populate("paidByFriendId", "name");
+    .populate("paidByFriendId", "name")
+      .populate("receivedFromFriendId", "name");
 
   if (!transaction) {
     res
@@ -418,6 +434,7 @@ export async function updateTransaction(
     note,
     date,
     paidByFriendId,
+    receivedFromFriendId,
     splits,
   } = req.body;
 
@@ -437,6 +454,17 @@ export async function updateTransaction(
   if (paidByFriendId) {
     const friend = await Friend.findOne({
       _id: paidByFriendId,
+      userId: req.userId,
+    });
+    if (!friend) {
+      res.status(400).json({ success: false, message: "Friend not found." });
+      return;
+    }
+  }
+
+  if (receivedFromFriendId) {
+    const friend = await Friend.findOne({
+      _id: receivedFromFriendId,
       userId: req.userId,
     });
     if (!friend) {
@@ -506,6 +534,7 @@ export async function updateTransaction(
       existing.accountId = effectiveAccountId;
       existing.toAccountId = toAccountId || undefined;
       existing.paidByFriendId = paidByFriendId || undefined;
+      existing.receivedFromFriendId = receivedFromFriendId || undefined;
       existing.note = note ?? undefined;
       existing.date = new Date(date);
       await existing.save({ session });
@@ -554,7 +583,8 @@ export async function updateTransaction(
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
       .populate("toAccountId", "name")
-      .populate("paidByFriendId", "name");
+      .populate("paidByFriendId", "name")
+      .populate("receivedFromFriendId", "name");
 
     const split = await SharedExpense.findOne({
       transactionId: existing._id,

@@ -26,6 +26,7 @@ const transactionSchema = z.object({
   note: z.string().optional(),
   date: dateString,
   paidByFriendId: z.string().optional(),
+  receivedFromFriendId: z.string().optional(),
   splits: z
     .array(
       z.object({

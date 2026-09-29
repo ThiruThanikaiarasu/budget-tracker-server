@@ -12,6 +12,10 @@ export interface ITransaction extends Document {
   toAccountId?: mongoose.Types.ObjectId;
   // Set when a friend paid on behalf of the user; absent when the user paid.
   paidByFriendId?: mongoose.Types.ObjectId;
+  // Set on an income transaction that a friend sent the user directly (e.g. a
+  // gift or reimbursement with no tracked debt). Purely informational — does
+  // NOT affect the friend balance/SharedExpense system.
+  receivedFromFriendId?: mongoose.Types.ObjectId;
   // Balance-reconciliation entry ("Clean up · new journey"): adjusts an account
   // to a real balance. Excluded from spend/income/budget reports but still shown
   // in the transaction history.
@@ -57,6 +61,10 @@ const transactionSchema = new Schema<ITransaction>(
       ref: "Account",
     },
     paidByFriendId: {
+      type: Schema.Types.ObjectId,
+      ref: "Friend",
+    },
+    receivedFromFriendId: {
       type: Schema.Types.ObjectId,
       ref: "Friend",
     },

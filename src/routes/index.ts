@@ -14,6 +14,8 @@ import watchlistRoutes from "./watchlists.js";
 import stockAnalysisRoutes from "./stockAnalysis.js";
 import investmentBudgetRoutes from "./investmentBudgets.js";
 import budgetRoutes from "./budgets.js";
+import strategyRoutes from "./strategies.js";
+import domainRoutes from "./domains.js";
 
 const router = Router();
 
@@ -32,5 +34,7 @@ router.use("/watchlists", watchlistRoutes);
 router.use("/stock-analysis", stockAnalysisRoutes);
 router.use("/investment-budgets", investmentBudgetRoutes);
 router.use("/budgets", budgetRoutes);
+router.use("/strategies", strategyRoutes);
+router.use("/domains", domainRoutes);
 
 export default router;

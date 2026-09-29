@@ -11,6 +11,9 @@ export interface IWatchlistItem {
   notes?: string;
   lastPrice?: number;
   lastPriceAt?: Date;
+  // Domains this item belongs to (its asset class, plus a sector if it's a stock).
+  // Every strategy linked to these domains is evaluated for the item.
+  domainIds?: Types.ObjectId[];
 }
 
 export interface IWatchlist extends Document {
@@ -33,6 +36,7 @@ const watchlistItemSchema = new Schema<IWatchlistItem>({
   notes: { type: String },
   lastPrice: { type: Number, min: 0 },
   lastPriceAt: { type: Date },
+  domainIds: { type: [Schema.Types.ObjectId], ref: "Domain", default: [] },
 });
 
 const watchlistSchema = new Schema<IWatchlist>(

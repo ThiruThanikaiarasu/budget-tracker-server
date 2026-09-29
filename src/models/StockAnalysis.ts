@@ -19,6 +19,10 @@ export interface IFundamentals {
   low52?: number;
   debtToEquity?: number;
   industry?: string;
+  // Price-derived technicals (Zerodha historical). Kept here alongside 52w
+  // high/low so the strategy evaluator reads all metrics from one place.
+  sma50?: number;
+  sma200?: number;
 }
 
 export interface IStockAnalysis extends Document {
@@ -49,6 +53,8 @@ const fundamentalsSchema = new Schema<IFundamentals>(
     low52: Number,
     debtToEquity: Number,
     industry: String,
+    sma50: Number,
+    sma200: Number,
   },
   { _id: false }
 );

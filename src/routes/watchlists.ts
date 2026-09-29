@@ -12,6 +12,7 @@ import {
   removeItem,
   updatePrices,
 } from "../controllers/watchlistController.js";
+import { analyzeWatchlist } from "../controllers/wishlistAnalysisController.js";
 
 const exchanges = ["NSE", "BSE"] as const;
 
@@ -37,6 +38,7 @@ const addItemSchema = z.object({
   instrumentToken: z.number().optional(),
   targetBuyPrice: z.number().min(0).optional(),
   notes: z.string().optional(),
+  domainIds: z.array(z.string()).optional(),
 });
 
 const updateItemSchema = z
@@ -44,11 +46,11 @@ const updateItemSchema = z
     name: z.string().min(1).optional(),
     targetBuyPrice: z.number().min(0).optional(),
     notes: z.string().optional(),
+    domainIds: z.array(z.string()).optional(),
   })
-  .refine(
-    (d) => d.name !== undefined || d.targetBuyPrice !== undefined || d.notes !== undefined,
-    { message: "Provide at least one field to update." }
-  );
+  .refine((d) => Object.keys(d).length > 0, {
+    message: "Provide at least one field to update.",
+  });
 
 const pricesSchema = z.object({
   prices: z
@@ -69,6 +71,7 @@ router.use(authenticate);
 router.get("/", getWatchlists);
 router.post("/", validate(createSchema), createWatchlist);
 router.post("/prices", validate(pricesSchema), updatePrices);
+router.get("/:id/analysis", analyzeWatchlist);
 router.put("/:id", validate(updateSchema), updateWatchlist);
 router.delete("/:id", deleteWatchlist);
 router.post("/:id/items", validate(addItemSchema), addItem);

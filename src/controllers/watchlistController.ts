@@ -85,7 +85,7 @@ export async function addItem(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const { symbol, exchange, name, instrumentToken, targetBuyPrice, notes } =
+  const { symbol, exchange, name, instrumentToken, targetBuyPrice, notes, domainIds } =
     req.body as {
       symbol: string;
       exchange: "NSE" | "BSE";
@@ -93,6 +93,7 @@ export async function addItem(req: Request, res: Response): Promise<void> {
       instrumentToken?: number;
       targetBuyPrice?: number;
       notes?: string;
+      domainIds?: string[];
     };
 
   watchlist.items.push({
@@ -102,6 +103,7 @@ export async function addItem(req: Request, res: Response): Promise<void> {
     instrumentToken,
     targetBuyPrice,
     notes,
+    domainIds,
   } as never);
   await watchlist.save();
 
@@ -125,14 +127,16 @@ export async function updateItem(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  const { targetBuyPrice, notes, name } = req.body as {
+  const { targetBuyPrice, notes, name, domainIds } = req.body as {
     targetBuyPrice?: number;
     notes?: string;
     name?: string;
+    domainIds?: string[];
   };
   if (targetBuyPrice !== undefined) item.targetBuyPrice = targetBuyPrice;
   if (notes !== undefined) item.notes = notes;
   if (name !== undefined) item.name = name;
+  if (domainIds !== undefined) item.domainIds = domainIds as never;
 
   await watchlist.save();
   res.status(200).json({ success: true, watchlist });
