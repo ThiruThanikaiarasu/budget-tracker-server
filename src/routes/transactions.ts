@@ -7,6 +7,7 @@ import {
   createTransaction,
   getTransactions,
   getTransactionsSummary,
+  getMerchantSuggestions,
   getTransaction,
   updateTransaction,
   deleteTransaction,
@@ -24,6 +25,7 @@ const transactionSchema = z.object({
   accountId: z.string().optional(),
   toAccountId: z.string().optional(),
   note: z.string().optional(),
+  merchant: z.string().trim().max(80).optional(),
   date: dateString,
   paidByFriendId: z.string().optional(),
   receivedFromFriendId: z.string().optional(),
@@ -34,6 +36,25 @@ const transactionSchema = z.object({
         amount: z.number().min(0),
       })
     )
+    .optional(),
+  // Itemised breakdown (sub-category items). See ITransactionItem.
+  items: z
+    .array(
+      z.object({
+        itemId: z.string().optional(),
+        name: z.string().trim().min(1),
+        quantity: z.number().positive().optional(),
+        unit: z.string().optional(),
+        unitId: z.string().optional(),
+        baseQuantity: z.number().min(0).optional(),
+        amount: z.number().min(0),
+        categoryId: z.string().optional(),
+        sharedWith: z.array(z.string().min(1)).optional(),
+      })
+    )
+    .optional(),
+  charges: z
+    .array(z.object({ label: z.string().trim().min(1), amount: z.number(), categoryId: z.string().optional(), bill: z.boolean().optional() }))
     .optional(),
 });
 
@@ -56,6 +77,7 @@ router.post("/cleanup", validate(cleanupSchema), cleanupAccounts);
 router.post("/", validate(transactionSchema), createTransaction);
 router.get("/", getTransactions);
 router.get("/summary", getTransactionsSummary);
+router.get("/merchants", getMerchantSuggestions);
 router.get("/:id", getTransaction);
 router.put("/:id", validate(transactionSchema), updateTransaction);
 router.delete("/:id", deleteTransaction);

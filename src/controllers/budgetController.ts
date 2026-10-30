@@ -17,6 +17,7 @@ import {
   endOfISTDay,
   formatISTDateStr,
 } from "../utils/financialMonth.js";
+import { categoryAllocationStages } from "../utils/categoryAllocation.js";
 
 export async function upsertBudget(
   req: Request,
@@ -318,13 +319,14 @@ export async function getMonthlySummary(
         categoryId: { $exists: true },
       },
     },
+    ...categoryAllocationStages,
     {
       $group: {
         _id: {
           date: { $dateToString: { format: "%Y-%m-%d", date: "$date" } },
-          categoryId: "$categoryId",
+          categoryId: "$alloc.categoryId",
         },
-        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
+        total: { $sum: "$alloc.amount" },
       },
     },
   ]);
@@ -477,10 +479,11 @@ export async function getTodaySummary(
         categoryId: { $exists: true },
       },
     },
+    ...categoryAllocationStages,
     {
       $group: {
-        _id: "$categoryId",
-        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
+        _id: "$alloc.categoryId",
+        total: { $sum: "$alloc.amount" },
       },
     },
   ]);
@@ -495,10 +498,11 @@ export async function getTodaySummary(
         categoryId: { $exists: true },
       },
     },
+    ...categoryAllocationStages,
     {
       $group: {
-        _id: "$categoryId",
-        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
+        _id: "$alloc.categoryId",
+        total: { $sum: "$alloc.amount" },
       },
     },
   ]);

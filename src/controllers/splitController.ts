@@ -144,6 +144,7 @@ export async function settleUp(
     friendOwes,
     accountId,
     coveredExpenseIds,
+    waivedAmount,
   }: {
     friendId: string;
     amount: number;
@@ -151,7 +152,19 @@ export async function settleUp(
     friendOwes: boolean;
     accountId?: string;
     coveredExpenseIds?: string[];
+    waivedAmount?: number;
   } = req.body;
+
+  // A partial payment can forgive the rest in the same step. That only makes
+  // sense next to a payment — a plain waive already forgives the whole amount.
+  if (waivedAmount && method === "waived") {
+    res.status(400).json({
+      success: false,
+      message: "waivedAmount only goes with a received or paid settlement.",
+    });
+    return;
+  }
+  const forgiven = waivedAmount ?? 0;
 
   const friend = await Friend.findOne({
     _id: friendId,
@@ -208,7 +221,8 @@ export async function settleUp(
       (sum, e) => sum + netBalanceContribution(e, friendId),
       0
     );
-    const submittedSigned = friendOwes ? amount : -amount;
+    // What the selected expenses must add up to: the money part plus the part forgiven.
+    const submittedSigned = friendOwes ? amount + forgiven : -(amount + forgiven);
     if (Math.abs(expectedSigned - submittedSigned) > 0.01) {
       res.status(400).json({
         success: false,
@@ -325,6 +339,44 @@ export async function settleUp(
       // method === "waived" && !friendOwes: the friend forgave your debt.
       // Nothing moves and it isn't your income; the settlement record alone
       // clears it.
+
+      // The forgiven rest of a partial payment: its own waived settlement, with
+      // the same effects a plain waive has.
+      if (forgiven > 0) {
+        await SharedExpense.create(
+          [
+            {
+              userId: req.userId,
+              description: `Waived part of settlement with ${friend.name}`,
+              totalAmount: forgiven,
+              paidBy: friendOwes ? "user" : friendId,
+              date: now,
+              splits: [{ friendId, amount: forgiven }],
+              isSettlement: true,
+              settlementMethod: "waived",
+              coveredExpenseIds: [],
+            },
+          ],
+          { session }
+        );
+        if (friendOwes) {
+          const categoryId = await getOrCreateCategory(req.userId!, "Waived", "expense");
+          await Transaction.create(
+            [
+              {
+                userId: req.userId,
+                type: "expense",
+                amount: forgiven,
+                categoryId,
+                personalShare: forgiven,
+                note: `Waived debt for ${friend.name}`,
+                date: now,
+              },
+            ],
+            { session }
+          );
+        }
+      }
     });
   } finally {
     await session.endSession();

@@ -1,5 +1,39 @@
 import mongoose, { Schema, Document } from "mongoose";
 
+// One priced line of an itemised bill (e.g. Tomato · 1 kg · ₹60). name/unit
+// are copied from the CategoryItem at save time so history survives renames
+// and deletes of the item.
+export interface ITransactionItem {
+  itemId?: mongoose.Types.ObjectId;
+  name: string;
+  quantity?: number;
+  unit?: string;
+  // Unit id within the item's UnitGroup, and quantity × unit factor in the
+  // group's base unit (e.g. 2 kg → 2000) — lets prices be compared per kg.
+  unitId?: mongoose.Types.ObjectId;
+  baseQuantity?: number;
+  amount: number;
+  // Category of this line when it differs from the transaction's category
+  // (e.g. a Snacks sandwich on a Tea bill). Absent = the transaction's category.
+  categoryId?: mongoose.Types.ObjectId;
+  // Who shares this item when the bill is split by item: "user" and/or
+  // Friend ids. Absent when the transaction isn't split.
+  sharedWith?: string[];
+}
+
+// Bill-level extra: delivery fee, tax (positive) or discount (negative).
+// When split by item, spread across people in proportion to their item totals.
+export interface ITransactionCharge {
+  label: string;
+  amount: number;
+  // Category the fee/discount belongs to when it differs from the
+  // transaction's. Absent = the transaction's category.
+  categoryId?: mongoose.Types.ObjectId;
+  // Applies to the whole bill (delivery fee, tax, coupon): spread across the
+  // categories in proportion to their amounts. Overrides categoryId.
+  bill?: boolean;
+}
+
 export interface ITransaction extends Document {
   userId: mongoose.Types.ObjectId;
   type: "income" | "expense" | "transfer";
@@ -20,6 +54,11 @@ export interface ITransaction extends Document {
   // to a real balance. Excluded from spend/income/budget reports but still shown
   // in the transaction history.
   isAdjustment?: boolean;
+  // Itemised breakdown. When present, amount = sum(items) + sum(charges).
+  items?: ITransactionItem[];
+  charges?: ITransactionCharge[];
+  // Where it was bought: Swiggy, Amazon, a hotel's name…
+  merchant?: string;
   note?: string;
   date: Date;
   createdAt: Date;
@@ -70,6 +109,39 @@ const transactionSchema = new Schema<ITransaction>(
     },
     isAdjustment: {
       type: Boolean,
+    },
+    items: {
+      type: [
+        {
+          _id: false,
+          itemId: { type: Schema.Types.ObjectId, ref: "CategoryItem" },
+          name: { type: String, required: true, trim: true },
+          quantity: { type: Number, min: 0 },
+          unit: { type: String, trim: true },
+          unitId: { type: Schema.Types.ObjectId },
+          baseQuantity: { type: Number, min: 0 },
+          amount: { type: Number, required: true, min: 0 },
+          categoryId: { type: Schema.Types.ObjectId, ref: "Category" },
+          sharedWith: { type: [String], default: undefined },
+        },
+      ],
+      default: undefined,
+    },
+    charges: {
+      type: [
+        {
+          _id: false,
+          label: { type: String, required: true, trim: true },
+          amount: { type: Number, required: true },
+          categoryId: { type: Schema.Types.ObjectId, ref: "Category" },
+          bill: { type: Boolean },
+        },
+      ],
+      default: undefined,
+    },
+    merchant: {
+      type: String,
+      trim: true,
     },
     note: {
       type: String,

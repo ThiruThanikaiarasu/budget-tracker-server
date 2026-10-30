@@ -5,6 +5,81 @@ import { Account } from "../models/Account.js";
 import { Category } from "../models/Category.js";
 import { SharedExpense } from "../models/SharedExpense.js";
 import { Friend } from "../models/Friend.js";
+import { CategoryItem } from "../models/CategoryItem.js";
+
+type ItemInput = {
+  itemId?: string;
+  name: string;
+  quantity?: number;
+  unit?: string;
+  unitId?: string;
+  baseQuantity?: number;
+  amount: number;
+  categoryId?: string;
+  sharedWith?: string[];
+};
+type ChargeInput = { label: string; amount: number; categoryId?: string; bill?: boolean };
+
+/**
+ * Validate an itemised breakdown: the lines must add up to `amount`, item ids
+ * must be this user's CategoryItems and sharedWith entries must be "user" or
+ * this user's friends. Returns the cleaned arrays to store (undefined when the
+ * transaction isn't itemised) or an error message.
+ */
+async function prepareItems(
+  userId: string,
+  amount: number,
+  items: ItemInput[] | undefined,
+  charges: ChargeInput[] | undefined
+): Promise<
+  | { error: string }
+  | { items: ItemInput[] | undefined; charges: ChargeInput[] | undefined }
+> {
+  if (!items || items.length === 0) return { items: undefined, charges: undefined };
+
+  const lines = [...items.map((i) => i.amount), ...(charges ?? []).map((c) => c.amount)];
+  const sum = Math.round(lines.reduce((s, n) => s + n, 0) * 100) / 100;
+  if (Math.abs(sum - amount) > 0.01) {
+    return { error: `Items add up to ${sum}, not the total ${amount}.` };
+  }
+
+  const itemIds = [...new Set(items.map((i) => i.itemId).filter((id): id is string => !!id))];
+  if (itemIds.length > 0) {
+    const count = await CategoryItem.countDocuments({ _id: { $in: itemIds }, userId });
+    if (count !== itemIds.length) return { error: "Item not found." };
+  }
+
+  const lineCategoryIds = [
+    ...new Set(
+      [...items.map((i) => i.categoryId), ...(charges ?? []).map((c) => c.categoryId)].filter((id): id is string => !!id)
+    ),
+  ];
+  if (lineCategoryIds.length > 0) {
+    const count = await Category.countDocuments({
+      _id: { $in: lineCategoryIds },
+      $or: [{ userId }, { userId: null }],
+    });
+    if (count !== lineCategoryIds.length) return { error: "Category not found." };
+  }
+
+  const friendIds = [
+    ...new Set(items.flatMap((i) => i.sharedWith ?? []).filter((id) => id !== "user")),
+  ];
+  if (friendIds.length > 0) {
+    const count = await Friend.countDocuments({ _id: { $in: friendIds }, userId });
+    if (count !== friendIds.length) return { error: "Friend not found." };
+  }
+
+  return {
+    items: items.map((i) => ({
+      ...i,
+      categoryId: i.categoryId || undefined,
+      unit: i.unit?.trim().toLowerCase() || undefined,
+      sharedWith: i.sharedWith?.length ? i.sharedWith : undefined,
+    })),
+    charges: charges?.length ? charges.map((c) => ({ ...c, categoryId: c.bill ? undefined : c.categoryId || undefined, bill: c.bill || undefined })) : undefined,
+  };
+}
 
 /**
  * Validate that accountId / toAccountId / categoryId (whichever are present)
@@ -90,10 +165,13 @@ export async function createTransaction(
     accountId,
     toAccountId,
     note,
+    merchant,
     date,
     paidByFriendId,
     receivedFromFriendId,
     splits,
+    items,
+    charges,
   } = req.body;
 
   // If friend paid, validate the friend exists
@@ -126,6 +204,12 @@ export async function createTransaction(
   });
   if (refError) {
     res.status(400).json({ success: false, message: refError });
+    return;
+  }
+
+  const itemized = await prepareItems(req.userId!, amount, items, charges);
+  if ("error" in itemized) {
+    res.status(400).json({ success: false, message: itemized.error });
     return;
   }
 
@@ -176,7 +260,10 @@ export async function createTransaction(
             toAccountId: toAccountId || undefined,
             paidByFriendId: paidByFriendId || undefined,
             receivedFromFriendId: receivedFromFriendId || undefined,
+            items: itemized.items,
+            charges: itemized.charges,
             note: note ?? undefined,
+            merchant: merchant || undefined,
             date: new Date(date),
           },
         ],
@@ -270,7 +357,10 @@ async function buildTransactionFilter(
   const filter: Record<string, unknown> = { userId: req.userId };
 
   if (type) filter.type = type;
-  if (categoryId) filter.categoryId = categoryId;
+  // A bill can span categories: match the transaction's own category or any
+  // line item filed under it.
+  const and: Record<string, unknown>[] = [];
+  if (categoryId) and.push({ $or: [{ categoryId }, { "items.categoryId": categoryId }] });
   if (accountId) filter.accountId = accountId;
 
   if (dateFrom || dateTo) {
@@ -280,7 +370,7 @@ async function buildTransactionFilter(
     filter.date = dateFilter;
   }
 
-  // Free-text search across note, category name and amount. It's ANDed with
+  // Free-text search across note, item names, category name and amount. It's ANDed with
   // the date window above, so it only ever searches the month currently in
   // view — the client always passes the viewed month's dateFrom/dateTo.
   const term = typeof search === "string" ? search.trim() : "";
@@ -295,9 +385,10 @@ async function buildTransactionFilter(
       name: rx,
     }).select("_id");
 
-    const or: Record<string, unknown>[] = [{ note: rx }];
+    const or: Record<string, unknown>[] = [{ note: rx }, { merchant: rx }, { "items.name": rx }];
     if (matchingCategories.length) {
-      or.push({ categoryId: { $in: matchingCategories.map((c) => c._id) } });
+      const ids = matchingCategories.map((c) => c._id);
+      or.push({ categoryId: { $in: ids } }, { "items.categoryId": { $in: ids } });
     }
     // "Contains" match on the amount's digits (e.g. "50" hits 50, 500, 1500).
     if (/\d/.test(term)) {
@@ -312,8 +403,10 @@ async function buildTransactionFilter(
       });
     }
 
-    filter.$or = or;
+    and.push({ $or: or });
   }
+
+  if (and.length > 0) filter.$and = and;
 
   return filter;
 }
@@ -378,6 +471,68 @@ export async function getTransactions(
  * client happens to have loaded via infinite scroll. Clean-up adjustment
  * entries (isAdjustment) are excluded, matching the dashboard summary's rule.
  */
+/**
+ * "Where from?" suggestions: the user's merchants, best match first.
+ * Only the same kind of transaction counts (income vs expense). A merchant
+ * scores higher the more of its transactions share the chosen category (3 each)
+ * and the chosen account's type (2 each); every use counts 1, so frequent
+ * places still rise. `q` narrows to names containing it.
+ */
+export async function getMerchantSuggestions(req: Request, res: Response): Promise<void> {
+  const { type, categoryId, accountId, q } = req.query;
+  const userId = new mongoose.Types.ObjectId(req.userId);
+
+  const match: Record<string, unknown> = {
+    userId,
+    merchant: { $exists: true, $nin: [null, ""] },
+    isAdjustment: { $ne: true },
+  };
+  if (type === "income" || type === "expense") match.type = type;
+  const term = typeof q === "string" ? q.trim() : "";
+  if (term) match.merchant = { $regex: term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+
+  const catId =
+    typeof categoryId === "string" && mongoose.isValidObjectId(categoryId)
+      ? new mongoose.Types.ObjectId(categoryId)
+      : null;
+  let accountType: string | null = null;
+  if (typeof accountId === "string" && mongoose.isValidObjectId(accountId)) {
+    const account = await Account.findOne({ _id: accountId, userId }).select("type").lean();
+    accountType = account?.type ?? null;
+  }
+
+  const rows = await Transaction.aggregate([
+    { $match: match },
+    { $lookup: { from: "accounts", localField: "accountId", foreignField: "_id", as: "_acc" } },
+    {
+      $addFields: {
+        _key: { $toLower: "$merchant" },
+        _catHit: catId
+          ? { $cond: [{ $or: [{ $eq: ["$categoryId", catId] }, { $in: [catId, { $ifNull: ["$items.categoryId", []] }] }] }, 1, 0] }
+          : 0,
+        _accHit: accountType ? { $cond: [{ $eq: [{ $arrayElemAt: ["$_acc.type", 0] }, accountType] }, 1, 0] } : 0,
+      },
+    },
+    { $sort: { date: -1 } },
+    {
+      $group: {
+        _id: "$_key",
+        name: { $first: "$merchant" },
+        count: { $sum: 1 },
+        cat: { $sum: "$_catHit" },
+        acc: { $sum: "$_accHit" },
+        last: { $max: "$date" },
+      },
+    },
+    { $addFields: { score: { $add: [{ $multiply: ["$cat", 3] }, { $multiply: ["$acc", 2] }, "$count"] } } },
+    { $sort: { score: -1, last: -1 } },
+    { $limit: 8 },
+    { $project: { _id: 0, name: 1, count: 1 } },
+  ]);
+
+  res.status(200).json({ success: true, merchants: rows });
+}
+
 export async function getTransactionsSummary(
   req: Request,
   res: Response
@@ -456,10 +611,13 @@ export async function updateTransaction(
     accountId,
     toAccountId,
     note,
+    merchant,
     date,
     paidByFriendId,
     receivedFromFriendId,
     splits,
+    items,
+    charges,
   } = req.body;
 
   const existing = await Transaction.findOne({
@@ -504,6 +662,12 @@ export async function updateTransaction(
   });
   if (refError) {
     res.status(400).json({ success: false, message: refError });
+    return;
+  }
+
+  const itemized = await prepareItems(req.userId!, amount, items, charges);
+  if ("error" in itemized) {
+    res.status(400).json({ success: false, message: itemized.error });
     return;
   }
 
@@ -559,7 +723,10 @@ export async function updateTransaction(
       existing.toAccountId = toAccountId || undefined;
       existing.paidByFriendId = paidByFriendId || undefined;
       existing.receivedFromFriendId = receivedFromFriendId || undefined;
+      existing.set("items", itemized.items); // undefined clears it
+      existing.set("charges", itemized.charges);
       existing.note = note ?? undefined;
+      existing.merchant = merchant || undefined;
       existing.date = new Date(date);
       await existing.save({ session });
 

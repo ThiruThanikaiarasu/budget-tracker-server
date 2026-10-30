@@ -3,6 +3,30 @@ import mongoose from "mongoose";
 import { Category } from "../models/Category.js";
 import { User } from "../models/User.js";
 import { Transaction } from "../models/Transaction.js";
+import { CategoryItem } from "../models/CategoryItem.js";
+import { normalizeName } from "../utils/normalizeName.js";
+
+/**
+ * Name of a category the user can already see that collides with `name`
+ * (case- and whitespace-insensitive, same type), or null. `excludeId` skips
+ * the category being edited.
+ */
+async function findDuplicateCategory(
+  userId: string,
+  name: string,
+  type: string,
+  excludeId?: string
+): Promise<string | null> {
+  const user = await User.findById(userId);
+  const hiddenIds = (user?.hiddenCategoryIds ?? []).map((id) => id.toString());
+  const visible = await Category.find({
+    $or: [{ userId: null }, { userId }],
+    _id: { $nin: excludeId ? [...hiddenIds, excludeId] : hiddenIds },
+    type,
+  }).select("name");
+  const key = normalizeName(name);
+  return visible.find((c) => normalizeName(c.name) === key)?.name ?? null;
+}
 
 export async function getCategories(
   req: Request,
@@ -35,6 +59,12 @@ export async function createCategory(
 ): Promise<void> {
   const { name, type, icon } = req.body;
 
+  const duplicate = await findDuplicateCategory(req.userId!, name, type);
+  if (duplicate) {
+    res.status(409).json({ success: false, message: `"${duplicate}" already exists.` });
+    return;
+  }
+
   const category = await Category.create({ userId: req.userId, name, type, icon });
 
   await User.findByIdAndUpdate(req.userId, {
@@ -53,6 +83,18 @@ export async function updateCategory(
   const category = await Category.findById(req.params.id);
   if (!category) {
     res.status(404).json({ success: false, message: "Category not found." });
+    return;
+  }
+
+  // Only re-check when the name/type actually changes, so an icon-only edit
+  // of a pre-existing near-duplicate isn't blocked.
+  const renamed =
+    normalizeName(name) !== normalizeName(category.name) || type !== category.type;
+  const duplicate = renamed
+    ? await findDuplicateCategory(req.userId!, name, type, category._id.toString())
+    : null;
+  if (duplicate) {
+    res.status(409).json({ success: false, message: `"${duplicate}" already exists.` });
     return;
   }
 
@@ -84,6 +126,13 @@ export async function updateCategory(
     }
 
     await user.save();
+
+    // Sub-category items follow the category to its user-owned clone.
+    await CategoryItem.updateMany(
+      { userId: req.userId, categoryId: originalId },
+      { categoryId: newCat._id }
+    );
+
     res.status(200).json({ success: true, category: newCat });
     return;
   }
@@ -152,6 +201,7 @@ export async function deleteCategory(
   }
 
   await category.deleteOne();
+  await CategoryItem.deleteMany({ userId: req.userId, categoryId: category._id });
 
   await User.findByIdAndUpdate(req.userId, {
     $pull: { categoryOrder: category._id },

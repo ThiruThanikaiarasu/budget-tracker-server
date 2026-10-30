@@ -34,6 +34,8 @@ const settleSchema = z
     friendOwes: z.boolean(),
     accountId: z.string().min(1).optional(),
     coveredExpenseIds: z.array(z.string().min(1)).optional(),
+    // Part that is forgiven in the same step (partial payment + waive the rest).
+    waivedAmount: z.number().positive().optional(),
   })
   .refine(
     (d) => d.method === "waived" || !!d.accountId,

@@ -1,12 +1,14 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Transaction } from "../models/Transaction.js";
+import { Account } from "../models/Account.js";
 import {
   getFinancialMonthRange,
   getCurrentFinancialMonth,
   getFinancialMonthForDate,
   getUserStartDay,
 } from "../utils/financialMonth.js";
+import { categoryAllocationStages } from "../utils/categoryAllocation.js";
 
 export async function getSummary(
   req: Request,
@@ -42,12 +44,28 @@ export async function getSummary(
     if (item._id === "expense") totalExpense = item.total;
   }
 
+  // Money in hand right now. UPI means the bank accounts (what UPI draws on);
+  // cash is the cash accounts. Wallets, cards and investments aren't in hand.
+  const liquid = await Account.find({
+    userId,
+    isActive: true,
+    type: { $in: ["bank_account", "cash"] },
+  })
+    .select("name type balance")
+    .sort({ name: 1 })
+    .lean();
+  const part = (type: string) => liquid.filter((a) => a.type === type).map((a) => ({ name: a.name, balance: a.balance }));
+  const total = (list: { balance: number }[]) => Math.round(list.reduce((sum, a) => sum + a.balance, 0) * 100) / 100;
+  const upi = part("bank_account");
+  const cash = part("cash");
+
   res.status(200).json({
     success: true,
     summary: {
       totalIncome,
       totalExpense,
       net: totalIncome - totalExpense,
+      inHand: { upi: total(upi), cash: total(cash), accounts: { upi, cash } },
     },
   });
 }
@@ -76,10 +94,11 @@ export async function getCategoryBreakdown(
         categoryId: { $ne: null },
       },
     },
+    ...categoryAllocationStages,
     {
       $group: {
-        _id: "$categoryId",
-        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
+        _id: "$alloc.categoryId",
+        total: { $sum: "$alloc.amount" },
       },
     },
     {
