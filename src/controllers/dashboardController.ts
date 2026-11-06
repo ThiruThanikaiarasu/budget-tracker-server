@@ -9,6 +9,9 @@ import {
   getUserStartDay,
 } from "../utils/financialMonth.js";
 import { categoryAllocationStages } from "../utils/categoryAllocation.js";
+import { Category } from "../models/Category.js";
+import { SharedExpense } from "../models/SharedExpense.js";
+import { analyseMonth, attachPrevious, buildInsights, type AnalysisTx, type Basis, type CatInfo } from "../utils/monthAnalysis.js";
 
 export async function getSummary(
   req: Request,
@@ -185,4 +188,65 @@ export async function getMonthlyTrend(
   }));
 
   res.status(200).json({ success: true, trend });
+}
+
+
+/** The month shown as one story: what was bought, from where, what extras came on top. */
+export async function getMonthAnalysis(req: Request, res: Response): Promise<void> {
+  const userId = new mongoose.Types.ObjectId(req.userId);
+  const startDay = await getUserStartDay(req.userId!);
+  const asked = typeof req.query.month === "string" ? req.query.month : "";
+  const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(asked) ? asked : getCurrentFinancialMonth(startDay);
+  const basis: Basis = req.query.basis === "bill" ? "bill" : "mine";
+
+  // This month and the five before it, for the trend and the "last month" comparisons.
+  const shift = (m: string, by: number) => {
+    const [y, mo] = m.split("-").map(Number);
+    const d = new Date(Date.UTC(y, mo - 1 + by, 1));
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  };
+  const months = [-5, -4, -3, -2, -1, 0].map((n) => shift(month, n));
+  const prevMonth = months[months.length - 2];
+  const range = getFinancialMonthRange(month, startDay);
+  const from = getFinancialMonthRange(months[0], startDay).start;
+
+  const [txs, categories] = await Promise.all([
+    Transaction.find({ userId, type: "expense", isAdjustment: { $ne: true }, date: { $gte: from, $lte: range.end } })
+      .select("amount personalShare categoryId merchant date items charges")
+      .lean(),
+    Category.find({ $or: [{ userId }, { userId: null }] }).select("name icon").lean(),
+  ]);
+  const cats = new Map<string, CatInfo>(categories.map((c) => [String(c._id), { name: c.name, icon: c.icon ?? "" }]));
+
+  // Who each split bill was shared between, so every item can be divided the way it was ticked.
+  const splitIds = (txs as unknown as { _id: mongoose.Types.ObjectId; personalShare?: number }[]).filter((t) => t.personalShare != null).map((t) => t._id);
+  const shared = splitIds.length
+    ? await SharedExpense.find({ userId, transactionId: { $in: splitIds } }).select("transactionId splits").lean()
+    : [];
+  const people = new Map<string, string[]>(shared.map((e) => [String(e.transactionId), ["user", ...e.splits.map((s) => String(s.friendId))]]));
+  for (const t of txs as unknown as (AnalysisTx & { _id: mongoose.Types.ObjectId })[]) t.participants = people.get(String(t._id)) ?? null;
+
+  const buckets = new Map<string, AnalysisTx[]>();
+  for (const t of txs as unknown as AnalysisTx[]) {
+    const m = getFinancialMonthForDate(t.date, startDay);
+    if (!buckets.has(m)) buckets.set(m, []);
+    buckets.get(m)!.push(t);
+  }
+  const cur = analyseMonth(buckets.get(month) ?? [], basis, cats);
+  const prev = (buckets.get(prevMonth)?.length ?? 0) > 0 ? analyseMonth(buckets.get(prevMonth)!, basis, cats) : null;
+  attachPrevious(cur, prev);
+
+  const trend = months.map((m) => {
+    const t = analyseMonth(buckets.get(m) ?? [], basis, cats).totals;
+    return { month: m, spent: t.spent, items: t.items, fees: t.fees, discounts: t.discounts, bills: t.bills };
+  });
+
+  res.json({
+    month, prevMonth, basis,
+    start: range.start, end: range.end,
+    ...cur,
+    prevTotals: prev?.totals ?? null,
+    trend,
+    insights: buildInsights(cur, prev),
+  });
 }

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { validate } from "../middlewares/validate.js";
+import { recurringInput } from "../utils/recurring.js";
 import { authenticate } from "../middlewares/auth.js";
 import {
   getCategoryItems,
@@ -21,6 +22,8 @@ const fields = {
   presetOverrides: z
     .array(z.object({ unitId: z.string().min(1), values: z.array(z.number().positive()) }))
     .optional(),
+  // Repeats on a schedule (see utils/recurring.ts); null clears, absent leaves it.
+  recurring: recurringInput,
 };
 
 const createSchema = z.object({ categoryId: z.string().min(1), ...fields });

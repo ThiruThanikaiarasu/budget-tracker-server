@@ -100,7 +100,7 @@ export async function getSharedExpenses(
   const expenses = await SharedExpense.find(filter)
     .populate({
       path: "transactionId",
-      select: "categoryId",
+      select: "categoryId items charges",
       populate: { path: "categoryId", select: "name icon" },
     })
     .populate("splits.friendId", "name")
@@ -202,8 +202,12 @@ export async function settleUp(
     const covered = await SharedExpense.find({
       _id: { $in: coveredExpenseIds },
       userId: req.userId,
-      isSettlement: false,
-      $or: [{ "splits.friendId": friendId }, { paidBy: friendId }],
+      // Transfers can be cleared by a settle-all too: they already count in
+      // the friend balance the client is settling.
+      $and: [
+        { $or: [{ isSettlement: false }, { isTransfer: true }] },
+        { $or: [{ "splits.friendId": friendId }, { paidBy: friendId }] },
+      ],
     }).select("_id paidBy splits totalAmount isSettlement");
     if (covered.length !== coveredExpenseIds.length) {
       res.status(400).json({
@@ -216,7 +220,7 @@ export async function settleUp(
 
     // Signed outstanding share per expense: positive = friend owes user,
     // negative = user owes friend. Same shared math as calculateNetBalance/
-    // getBalances (none of `covered` are settlements, so only that branch runs).
+    // getBalances.
     const expectedSigned = covered.reduce(
       (sum, e) => sum + netBalanceContribution(e, friendId),
       0
@@ -385,6 +389,148 @@ export async function settleUp(
   res.status(201).json({ success: true, settlement });
 }
 
+/**
+ * Money sent to / received from a friend outside any bill ("Send money",
+ * "Got money"). Books the real money move (Transaction + account balance) and a
+ * settlement SharedExpense flagged isTransfer, so the friend balance moves by
+ * the same math as Settle Up: sending raises what they owe you, receiving
+ * lowers it.
+ *
+ * `repaysTransferId` ties it to an earlier transfer in the opposite direction
+ * (they pay back part of the 10K you sent), which is what lets the UI show a
+ * transfer's repayments and what is still left.
+ */
+export async function createTransfer(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const {
+    friendId,
+    direction,
+    amount,
+    accountId,
+    date,
+    note,
+    repaysTransferId,
+  }: {
+    friendId: string;
+    direction: "sent" | "received";
+    amount: number;
+    accountId: string;
+    date?: string;
+    note?: string;
+    repaysTransferId?: string;
+  } = req.body;
+
+  const friend = await Friend.findOne({ _id: friendId, userId: req.userId });
+  if (!friend) {
+    res.status(404).json({ success: false, message: "Friend not found." });
+    return;
+  }
+
+  const account = await Account.findOne({ _id: accountId, userId: req.userId });
+  if (!account) {
+    res.status(404).json({ success: false, message: "Account not found." });
+    return;
+  }
+
+  const method = direction === "sent" ? "paid" : "received";
+
+  if (repaysTransferId) {
+    const original = await SharedExpense.findOne({
+      _id: repaysTransferId,
+      userId: req.userId,
+      isTransfer: true,
+      repaysTransferId: { $exists: false },
+      "splits.friendId": friendId,
+    });
+    if (!original || original.settlementMethod === method) {
+      res.status(400).json({
+        success: false,
+        message: "Transfer to repay not found.",
+      });
+      return;
+    }
+    const repaid = await SharedExpense.aggregate([
+      {
+        $match: {
+          userId: new mongoose.Types.ObjectId(req.userId),
+          repaysTransferId: original._id,
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    ]);
+    const left = original.totalAmount - (repaid[0]?.total ?? 0);
+    if (amount > left + 0.01) {
+      res.status(400).json({
+        success: false,
+        message: `Only ${Math.round(left * 100) / 100} is left to repay on that transfer.`,
+      });
+      return;
+    }
+  }
+
+  const when = date ? new Date(date) : new Date();
+  const label =
+    note?.trim() ||
+    (direction === "sent" ? `Sent to ${friend.name}` : `Received from ${friend.name}`);
+
+  const session = await mongoose.startSession();
+  let transfer: InstanceType<typeof SharedExpense> | null = null;
+  try {
+    await session.withTransaction(async () => {
+      const categoryId = await getOrCreateCategory(
+        req.userId!,
+        "Friend transfer",
+        direction === "sent" ? "expense" : "income"
+      );
+      const docs = await Transaction.create(
+        [
+          {
+            userId: req.userId,
+            type: direction === "sent" ? "expense" : "income",
+            amount,
+            categoryId,
+            accountId,
+            note: label,
+            date: when,
+          },
+        ],
+        { session }
+      );
+      await Account.updateOne(
+        { _id: accountId, userId: req.userId },
+        { $inc: { balance: direction === "sent" ? -amount : amount } },
+        { session }
+      );
+
+      const created = await SharedExpense.create(
+        [
+          {
+            userId: req.userId,
+            transactionId: docs[0]._id,
+            description: label,
+            totalAmount: amount,
+            paidBy: direction === "sent" ? friendId : "user",
+            date: when,
+            splits: [{ friendId, amount }],
+            isSettlement: true,
+            isTransfer: true,
+            settlementMethod: method,
+            repaysTransferId: repaysTransferId || undefined,
+          },
+        ],
+        { session }
+      );
+      transfer = created[0];
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  res.status(201).json({ success: true, transfer });
+}
+
 export async function deleteSharedExpense(
   req: Request,
   res: Response
@@ -399,6 +545,47 @@ export async function deleteSharedExpense(
       success: false,
       message: "Shared expense not found.",
     });
+    return;
+  }
+
+  // A transfer owns its Transaction, so deleting it undoes the money move too.
+  // Refused while repayments point at it, which would orphan them.
+  if (expense.isTransfer) {
+    const repayments = await SharedExpense.countDocuments({
+      userId: req.userId,
+      repaysTransferId: expense._id,
+    });
+    if (repayments > 0) {
+      res.status(400).json({
+        success: false,
+        message: "Delete its repayments first.",
+      });
+      return;
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const tx = expense.transactionId
+          ? await Transaction.findOne({
+              _id: expense.transactionId,
+              userId: req.userId,
+            }).session(session)
+          : null;
+        if (tx?.accountId) {
+          await Account.updateOne(
+            { _id: tx.accountId, userId: req.userId },
+            { $inc: { balance: tx.type === "expense" ? tx.amount : -tx.amount } },
+            { session }
+          );
+        }
+        if (tx) await Transaction.deleteOne({ _id: tx._id }, { session });
+        await SharedExpense.deleteOne({ _id: expense._id }, { session });
+      });
+    } finally {
+      await session.endSession();
+    }
+    res.status(200).json({ success: true, message: "Transfer deleted." });
     return;
   }
 

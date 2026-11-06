@@ -23,6 +23,13 @@ export interface ISharedExpense extends Document {
   coveredExpenseIds?: mongoose.Types.ObjectId[];
   // How a settlement was resolved. Absent for non-settlement expenses.
   settlementMethod?: "received" | "paid" | "waived";
+  // A direct money transfer with a friend ("Send money" / "Got money"), not
+  // tied to a bill. Always a settlement (so balance math is unchanged) with a
+  // linked Transaction. 'paid' = you sent it, 'received' = they sent it.
+  isTransfer?: boolean;
+  // On a transfer, the earlier opposite-direction transfer this one repays
+  // (e.g. a part-payment of a 10K loan). Absent on the original transfer.
+  repaysTransferId?: mongoose.Types.ObjectId;
   createdAt: Date;
 }
 
@@ -84,6 +91,14 @@ const sharedExpenseSchema = new Schema<ISharedExpense>(
     settlementMethod: {
       type: String,
       enum: ["received", "paid", "waived"],
+    },
+    isTransfer: {
+      type: Boolean,
+    },
+    repaysTransferId: {
+      type: Schema.Types.ObjectId,
+      ref: "SharedExpense",
+      index: true,
     },
   },
   { timestamps: true }

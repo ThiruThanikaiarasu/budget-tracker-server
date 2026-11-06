@@ -98,7 +98,7 @@ export async function createTransfer(
 
   const populated = await Transaction.findById(transaction!._id)
     .populate("accountId", "name")
-    .populate("toAccountId", "name");
+    .populate("toAccountId", "name type");
 
   res.status(200).json({
     success: true,

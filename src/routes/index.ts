@@ -18,6 +18,7 @@ import investmentBudgetRoutes from "./investmentBudgets.js";
 import budgetRoutes from "./budgets.js";
 import strategyRoutes from "./strategies.js";
 import domainRoutes from "./domains.js";
+import recurringRoutes from "./recurring.js";
 
 const router = Router();
 
@@ -38,6 +39,7 @@ router.use("/watchlists", watchlistRoutes);
 router.use("/stock-analysis", stockAnalysisRoutes);
 router.use("/investment-budgets", investmentBudgetRoutes);
 router.use("/budgets", budgetRoutes);
+router.use("/recurring", recurringRoutes);
 router.use("/strategies", strategyRoutes);
 router.use("/domains", domainRoutes);
 

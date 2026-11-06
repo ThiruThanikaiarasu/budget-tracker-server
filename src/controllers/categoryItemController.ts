@@ -5,6 +5,7 @@ import { Transaction } from "../models/Transaction.js";
 import { CategoryItem } from "../models/CategoryItem.js";
 import { UnitGroup } from "../models/UnitGroup.js";
 import { normalizeName } from "../utils/normalizeName.js";
+import { buildRecurring } from "../utils/recurring.js";
 
 function duplicateMessage(name: string): string {
   return `"${name}" already exists in this category.`;
@@ -108,12 +109,19 @@ export async function createCategoryItem(
     return;
   }
 
+  const recurring = await buildRecurring(req.userId!, req.body.recurring);
+  if ("error" in recurring) {
+    res.status(400).json({ success: false, message: recurring.error });
+    return;
+  }
+
   const item = await CategoryItem.create({
     userId: req.userId,
     categoryId,
     name: name.trim(),
     normalizedName,
     ...measurement.fields,
+    recurring: recurring.change === "set" ? recurring.value : undefined,
   });
 
   res.status(201).json({ success: true, item });
@@ -154,9 +162,17 @@ export async function updateCategoryItem(
     return;
   }
 
+  const recurring = await buildRecurring(req.userId!, req.body.recurring, item.recurring);
+  if ("error" in recurring) {
+    res.status(400).json({ success: false, message: recurring.error });
+    return;
+  }
+
   item.name = name.trim();
   item.normalizedName = normalizedName;
   item.set(measurement.fields); // undefined fields are cleared
+  if (recurring.change === "set") item.recurring = recurring.value;
+  else if (recurring.change === "clear") item.set("recurring", undefined);
   item.unit = undefined; // legacy free-text unit is superseded
   await item.save();
 

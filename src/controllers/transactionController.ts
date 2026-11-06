@@ -6,6 +6,7 @@ import { Category } from "../models/Category.js";
 import { SharedExpense } from "../models/SharedExpense.js";
 import { Friend } from "../models/Friend.js";
 import { CategoryItem } from "../models/CategoryItem.js";
+import { TagGroup } from "../models/TagGroup.js";
 
 type ItemInput = {
   itemId?: string;
@@ -169,6 +170,8 @@ export async function createTransaction(
     date,
     paidByFriendId,
     receivedFromFriendId,
+    passedToFriendId,
+    passedFrom,
     splits,
     items,
     charges,
@@ -191,6 +194,14 @@ export async function createTransaction(
       _id: receivedFromFriendId,
       userId: req.userId,
     });
+    if (!friend) {
+      res.status(400).json({ success: false, message: "Friend not found." });
+      return;
+    }
+  }
+
+  if (passedToFriendId) {
+    const friend = await Friend.findOne({ _id: passedToFriendId, userId: req.userId });
     if (!friend) {
       res.status(400).json({ success: false, message: "Friend not found." });
       return;
@@ -260,6 +271,8 @@ export async function createTransaction(
             toAccountId: toAccountId || undefined,
             paidByFriendId: paidByFriendId || undefined,
             receivedFromFriendId: receivedFromFriendId || undefined,
+            passedToFriendId: passedToFriendId || undefined,
+            passedFrom: passedFrom || undefined,
             items: itemized.items,
             charges: itemized.charges,
             note: note ?? undefined,
@@ -320,9 +333,11 @@ export async function createTransaction(
     const populated = await Transaction.findById(transaction!._id)
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
-      .populate("toAccountId", "name")
+      .populate("toAccountId", "name type")
       .populate("paidByFriendId", "name")
-      .populate("receivedFromFriendId", "name");
+      .populate("receivedFromFriendId", "name")
+      .populate("passedToFriendId", "name")
+      .populate("tagId", "name month");
 
     // Attach the linked split so the freshly-created transaction the client
     // stores carries the same shape as the list/single/update responses.
@@ -352,7 +367,7 @@ export async function createTransaction(
 async function buildTransactionFilter(
   req: Request
 ): Promise<Record<string, unknown>> {
-  const { dateFrom, dateTo, type, categoryId, accountId, search } = req.query;
+  const { dateFrom, dateTo, type, categoryId, accountId, search, tagId } = req.query;
 
   const filter: Record<string, unknown> = { userId: req.userId };
 
@@ -362,6 +377,9 @@ async function buildTransactionFilter(
   const and: Record<string, unknown>[] = [];
   if (categoryId) and.push({ $or: [{ categoryId }, { "items.categoryId": categoryId }] });
   if (accountId) filter.accountId = accountId;
+  if (typeof tagId === "string" && mongoose.isValidObjectId(tagId)) {
+    filter.tagId = new mongoose.Types.ObjectId(tagId);
+  }
 
   if (dateFrom || dateTo) {
     const dateFilter: Record<string, Date> = {};
@@ -386,6 +404,8 @@ async function buildTransactionFilter(
     }).select("_id");
 
     const or: Record<string, unknown>[] = [{ note: rx }, { merchant: rx }, { "items.name": rx }];
+    const matchingTags = await TagGroup.find({ userId: req.userId, name: rx }).select("_id");
+    if (matchingTags.length) or.push({ tagId: { $in: matchingTags.map((t) => t._id) } });
     if (matchingCategories.length) {
       const ids = matchingCategories.map((c) => c._id);
       or.push({ categoryId: { $in: ids } }, { "items.categoryId": { $in: ids } });
@@ -411,6 +431,35 @@ async function buildTransactionFilter(
   return filter;
 }
 
+/**
+ * For fund transfers with a friend, who the money went to / came from. The
+ * Transaction itself doesn't store the friend; the linked SharedExpense does.
+ */
+async function transferFriendsByTx(
+  txIds: mongoose.Types.ObjectId[]
+): Promise<Map<string, { _id: unknown; name: string; direction: "sent" | "received"; repayment: boolean }>> {
+  const links = await SharedExpense.find({
+    transactionId: { $in: txIds },
+    isTransfer: true,
+  })
+    .select("transactionId settlementMethod splits repaysTransferId")
+    .populate("splits.friendId", "name");
+
+  const map = new Map<string, { _id: unknown; name: string; direction: "sent" | "received"; repayment: boolean }>();
+  for (const l of links) {
+    const friend = l.splits[0]?.friendId as unknown as { _id: unknown; name: string } | undefined;
+    if (!friend || !l.transactionId) continue;
+    map.set(l.transactionId.toString(), {
+      _id: friend._id,
+      name: friend.name,
+      direction: l.settlementMethod === "paid" ? "sent" : "received",
+      // Pays back an earlier loan, rather than starting one.
+      repayment: !!l.repaysTransferId,
+    });
+  }
+  return map;
+}
+
 export async function getTransactions(
   req: Request,
   res: Response
@@ -429,9 +478,11 @@ export async function getTransactions(
       .limit(limit)
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
-      .populate("toAccountId", "name")
+      .populate("toAccountId", "name type")
       .populate("paidByFriendId", "name")
-      .populate("receivedFromFriendId", "name"),
+      .populate("receivedFromFriendId", "name")
+      .populate("passedToFriendId", "name")
+      .populate("tagId", "name month"),
     Transaction.countDocuments(filter),
   ]);
 
@@ -448,9 +499,12 @@ export async function getTransactions(
     splits.map((s) => [s.transactionId!.toString(), s])
   );
 
+  const transferFriends = await transferFriendsByTx(transactions.map((t) => t._id as mongoose.Types.ObjectId));
+
   const transactionsWithSplit = transactions.map((t) => ({
     ...t.toObject(),
     split: splitByTxId.get(t._id!.toString()) ?? null,
+    transferFriend: transferFriends.get(t._id!.toString()) ?? null,
   }));
 
   res.status(200).json({
@@ -474,12 +528,12 @@ export async function getTransactions(
 /**
  * "Where from?" suggestions: the user's merchants, best match first.
  * Only the same kind of transaction counts (income vs expense). A merchant
- * scores higher the more of its transactions share the chosen category (3 each)
- * and the chosen account's type (2 each); every use counts 1, so frequent
- * places still rise. `q` narrows to names containing it.
+ * scores higher the more of its transactions share the chosen category (3 each);
+ * every use counts 1, so frequent places still rise. The account plays no part:
+ * the same shop is paid from different accounts. `q` narrows to names containing it.
  */
 export async function getMerchantSuggestions(req: Request, res: Response): Promise<void> {
-  const { type, categoryId, accountId, q } = req.query;
+  const { type, categoryId, q } = req.query;
   const userId = new mongoose.Types.ObjectId(req.userId);
 
   const match: Record<string, unknown> = {
@@ -495,22 +549,15 @@ export async function getMerchantSuggestions(req: Request, res: Response): Promi
     typeof categoryId === "string" && mongoose.isValidObjectId(categoryId)
       ? new mongoose.Types.ObjectId(categoryId)
       : null;
-  let accountType: string | null = null;
-  if (typeof accountId === "string" && mongoose.isValidObjectId(accountId)) {
-    const account = await Account.findOne({ _id: accountId, userId }).select("type").lean();
-    accountType = account?.type ?? null;
-  }
 
   const rows = await Transaction.aggregate([
     { $match: match },
-    { $lookup: { from: "accounts", localField: "accountId", foreignField: "_id", as: "_acc" } },
     {
       $addFields: {
         _key: { $toLower: "$merchant" },
         _catHit: catId
           ? { $cond: [{ $or: [{ $eq: ["$categoryId", catId] }, { $in: [catId, { $ifNull: ["$items.categoryId", []] }] }] }, 1, 0] }
           : 0,
-        _accHit: accountType ? { $cond: [{ $eq: [{ $arrayElemAt: ["$_acc.type", 0] }, accountType] }, 1, 0] } : 0,
       },
     },
     { $sort: { date: -1 } },
@@ -520,11 +567,10 @@ export async function getMerchantSuggestions(req: Request, res: Response): Promi
         name: { $first: "$merchant" },
         count: { $sum: 1 },
         cat: { $sum: "$_catHit" },
-        acc: { $sum: "$_accHit" },
         last: { $max: "$date" },
       },
     },
-    { $addFields: { score: { $add: [{ $multiply: ["$cat", 3] }, { $multiply: ["$acc", 2] }, "$count"] } } },
+    { $addFields: { score: { $add: [{ $multiply: ["$cat", 3] }, "$count"] } } },
     { $sort: { score: -1, last: -1 } },
     { $limit: 8 },
     { $project: { _id: 0, name: 1, count: 1 } },
@@ -543,12 +589,18 @@ export async function getTransactionsSummary(
     : { $in: ["income", "expense"] };
   filter.isAdjustment = { $ne: true };
 
+  // aggregate() doesn't cast like find() does: without this the string userId
+  // (and category/account ids) never match and every total comes back 0.
+  const match = Transaction.find(filter).cast(Transaction);
+
   const result = await Transaction.aggregate([
-    { $match: filter },
+    { $match: match },
     {
       $group: {
         _id: "$type",
-        total: { $sum: { $ifNull: ["$personalShare", "$amount"] } },
+        // Full bill amounts, matching the rows in the list. (Budgets and category
+        // reports use personalShare; these Records totals deliberately do not.)
+        total: { $sum: "$amount" },
       },
     },
   ]);
@@ -576,9 +628,11 @@ export async function getTransaction(
   })
     .populate("categoryId", "name icon")
     .populate("accountId", "name")
-    .populate("toAccountId", "name")
+    .populate("toAccountId", "name type")
     .populate("paidByFriendId", "name")
-      .populate("receivedFromFriendId", "name");
+      .populate("receivedFromFriendId", "name")
+      .populate("passedToFriendId", "name")
+      .populate("tagId", "name month");
 
   if (!transaction) {
     res
@@ -594,9 +648,17 @@ export async function getTransaction(
     .select("paidBy splits")
     .populate("splits.friendId", "name");
 
+  const transferFriend = (await transferFriendsByTx([transaction._id as mongoose.Types.ObjectId])).get(
+    transaction._id!.toString()
+  );
+
   res.status(200).json({
     success: true,
-    transaction: { ...transaction.toObject(), split: split ?? null },
+    transaction: {
+      ...transaction.toObject(),
+      split: split ?? null,
+      transferFriend: transferFriend ?? null,
+    },
   });
 }
 
@@ -615,6 +677,8 @@ export async function updateTransaction(
     date,
     paidByFriendId,
     receivedFromFriendId,
+    passedToFriendId,
+    passedFrom,
     splits,
     items,
     charges,
@@ -629,6 +693,16 @@ export async function updateTransaction(
     res
       .status(404)
       .json({ success: false, message: "Transaction not found." });
+    return;
+  }
+
+  // A friend transfer is edited from the friend's page: its SharedExpense and
+  // repayment links would fall out of step with an edit made here.
+  if (await SharedExpense.exists({ transactionId: existing._id, isTransfer: true })) {
+    res.status(400).json({
+      success: false,
+      message: "This is a friend transfer. Delete it from the friend's page and add it again to change it.",
+    });
     return;
   }
 
@@ -649,6 +723,14 @@ export async function updateTransaction(
       _id: receivedFromFriendId,
       userId: req.userId,
     });
+    if (!friend) {
+      res.status(400).json({ success: false, message: "Friend not found." });
+      return;
+    }
+  }
+
+  if (passedToFriendId) {
+    const friend = await Friend.findOne({ _id: passedToFriendId, userId: req.userId });
     if (!friend) {
       res.status(400).json({ success: false, message: "Friend not found." });
       return;
@@ -723,6 +805,9 @@ export async function updateTransaction(
       existing.toAccountId = toAccountId || undefined;
       existing.paidByFriendId = paidByFriendId || undefined;
       existing.receivedFromFriendId = receivedFromFriendId || undefined;
+      // Sent only by the Passing on panel; an ordinary edit leaves them alone.
+      if (passedToFriendId !== undefined) existing.passedToFriendId = passedToFriendId || undefined;
+      if (passedFrom !== undefined) existing.passedFrom = passedFrom || undefined;
       existing.set("items", itemized.items); // undefined clears it
       existing.set("charges", itemized.charges);
       existing.note = note ?? undefined;
@@ -812,9 +897,11 @@ export async function updateTransaction(
     const populated = await Transaction.findById(existing._id)
       .populate("categoryId", "name icon")
       .populate("accountId", "name")
-      .populate("toAccountId", "name")
+      .populate("toAccountId", "name type")
       .populate("paidByFriendId", "name")
-      .populate("receivedFromFriendId", "name");
+      .populate("receivedFromFriendId", "name")
+      .populate("passedToFriendId", "name")
+      .populate("tagId", "name month");
 
     const split = await SharedExpense.findOne({
       transactionId: existing._id,
@@ -927,6 +1014,23 @@ export async function deleteTransaction(
     return;
   }
 
+  // Deleting a transfer's transaction removes the transfer with it; repayments
+  // linked to it would be left pointing at nothing.
+  const linkedTransfer = await SharedExpense.findOne({
+    transactionId: existing._id,
+    isTransfer: true,
+  }).select("_id");
+  if (
+    linkedTransfer &&
+    (await SharedExpense.exists({ repaysTransferId: linkedTransfer._id }))
+  ) {
+    res.status(400).json({
+      success: false,
+      message: "Delete this transfer's repayments first.",
+    });
+    return;
+  }
+
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
@@ -956,4 +1060,107 @@ export async function deleteTransaction(
   } finally {
     await session.endSession();
   }
+}
+
+/**
+ * Put a transaction in a tag group, or take it out. Works on every type,
+ * transfers included (their other fields can't be edited), and moves no money.
+ *
+ * Send `tagId` to join an existing group, or `name` to find-or-create the group
+ * for that name in `month` (default: the month of the entry's own date). An
+ * empty body clears the tag.
+ */
+export async function setTransactionTag(
+  req: Request,
+  res: Response
+): Promise<void> {
+  const { tagId, name, month }: { tagId?: string; name?: string; month?: string } = req.body;
+
+  const existing = await Transaction.findOne({
+    _id: req.params.id,
+    userId: req.userId,
+  });
+  if (!existing) {
+    res
+      .status(404)
+      .json({ success: false, message: "Transaction not found." });
+    return;
+  }
+
+  let group: InstanceType<typeof TagGroup> | null = null;
+  const cleanName = (name ?? "").trim().replace(/\s+/g, " ");
+
+  if (tagId) {
+    group = await TagGroup.findOne({ _id: tagId, userId: req.userId });
+    if (!group) {
+      res.status(404).json({ success: false, message: "Tag not found." });
+      return;
+    }
+  } else if (cleanName) {
+    const d = existing.date;
+    const key =
+      month ??
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const normalizedName = cleanName.toLowerCase();
+    group =
+      (await TagGroup.findOne({ userId: req.userId, normalizedName, month: key })) ??
+      (await TagGroup.create({
+        userId: req.userId,
+        name: cleanName,
+        normalizedName,
+        month: key,
+      }));
+  }
+
+  existing.set("tagId", group?._id);
+  await existing.save();
+
+  res.status(200).json({
+    success: true,
+    tag: group ? { _id: group._id, name: group.name, month: group.month } : null,
+  });
+}
+
+/**
+ * Every tag group with what went through it: `out` = expenses plus account
+ * transfers (the user thinks of both as money spent on it), `in` = income.
+ * Clean-up adjustments are ignored. Also feeds the picker on the detail panel.
+ */
+export async function getTags(req: Request, res: Response): Promise<void> {
+  const rows = await Transaction.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(req.userId),
+        tagId: { $exists: true, $ne: null },
+        isAdjustment: { $ne: true },
+      },
+    },
+    {
+      $group: {
+        _id: "$tagId",
+        count: { $sum: 1 },
+        out: {
+          $sum: { $cond: [{ $in: ["$type", ["expense", "transfer"]] }, "$amount", 0] },
+        },
+        in: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$amount", 0] } },
+        last: { $max: "$date" },
+      },
+    },
+    { $lookup: { from: "taggroups", localField: "_id", foreignField: "_id", as: "g" } },
+    { $unwind: "$g" },
+    {
+      $project: {
+        _id: 1,
+        name: "$g.name",
+        month: "$g.month",
+        count: 1,
+        out: 1,
+        in: 1,
+        last: 1,
+      },
+    },
+    { $sort: { month: -1, name: 1 } },
+  ]);
+
+  res.status(200).json({ success: true, tags: rows });
 }

@@ -12,6 +12,8 @@ import {
   updateTransaction,
   deleteTransaction,
   cleanupAccounts,
+  setTransactionTag,
+  getTags,
 } from "../controllers/transactionController.js";
 
 // "transfer" is deliberately excluded — transfers must go through POST /transfers,
@@ -29,6 +31,9 @@ const transactionSchema = z.object({
   date: dateString,
   paidByFriendId: z.string().optional(),
   receivedFromFriendId: z.string().optional(),
+  // "Passed on" entries: who it went to and who it came from.
+  passedToFriendId: z.string().optional(),
+  passedFrom: z.string().trim().max(60).optional(),
   splits: z
     .array(
       z.object({
@@ -69,6 +74,14 @@ const cleanupSchema = z.object({
     .min(1),
 });
 
+// Join an existing group (tagId), find-or-create one by name (+ optional month),
+// or send neither to clear the tag.
+const tagSchema = z.object({
+  tagId: z.string().min(1).optional(),
+  name: z.string().trim().max(40).optional(),
+  month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
+});
+
 const router = Router();
 
 router.use(authenticate);
@@ -78,8 +91,10 @@ router.post("/", validate(transactionSchema), createTransaction);
 router.get("/", getTransactions);
 router.get("/summary", getTransactionsSummary);
 router.get("/merchants", getMerchantSuggestions);
+router.get("/tags", getTags);
 router.get("/:id", getTransaction);
 router.put("/:id", validate(transactionSchema), updateTransaction);
+router.patch("/:id/tag", validate(tagSchema), setTransactionTag);
 router.delete("/:id", deleteTransaction);
 
 export default router;

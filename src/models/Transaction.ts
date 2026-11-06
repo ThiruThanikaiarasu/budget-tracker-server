@@ -50,6 +50,11 @@ export interface ITransaction extends Document {
   // gift or reimbursement with no tracked debt). Purely informational — does
   // NOT affect the friend balance/SharedExpense system.
   receivedFromFriendId?: mongoose.Types.ObjectId;
+  // "Passed on": someone else's money forwarded to a friend. Who it went to,
+  // and who it came from (free text: it needn't be a friend). Informational only;
+  // no friend balance moves.
+  passedToFriendId?: mongoose.Types.ObjectId;
+  passedFrom?: string;
   // Balance-reconciliation entry ("Clean up · new journey"): adjusts an account
   // to a real balance. Excluded from spend/income/budget reports but still shown
   // in the transaction history.
@@ -59,6 +64,14 @@ export interface ITransaction extends Document {
   charges?: ITransactionCharge[];
   // Where it was bought: Swiggy, Amazon, a hotel's name…
   merchant?: string;
+  // Group that ties related entries together across types and accounts (e.g.
+  // "Rent · Nov 2026": the cash withdrawals and a friend's share). See TagGroup.
+  tagId?: mongoose.Types.ObjectId;
+  // Set on entries the recurring service added: "item:<id>" or "category:<id>"
+  // and the due date it covers. Unique per source and due date, so running the
+  // service twice (cron + app load) can't add the same month twice.
+  recurringKey?: string;
+  recurringDue?: Date;
   note?: string;
   date: Date;
   createdAt: Date;
@@ -107,6 +120,14 @@ const transactionSchema = new Schema<ITransaction>(
       type: Schema.Types.ObjectId,
       ref: "Friend",
     },
+    passedToFriendId: {
+      type: Schema.Types.ObjectId,
+      ref: "Friend",
+    },
+    passedFrom: {
+      type: String,
+      trim: true,
+    },
     isAdjustment: {
       type: Boolean,
     },
@@ -143,6 +164,13 @@ const transactionSchema = new Schema<ITransaction>(
       type: String,
       trim: true,
     },
+    tagId: {
+      type: Schema.Types.ObjectId,
+      ref: "TagGroup",
+      index: true,
+    },
+    recurringKey: { type: String },
+    recurringDue: { type: Date },
     note: {
       type: String,
       trim: true,
@@ -153,6 +181,11 @@ const transactionSchema = new Schema<ITransaction>(
     },
   },
   { timestamps: true }
+);
+
+transactionSchema.index(
+  { userId: 1, recurringKey: 1, recurringDue: 1 },
+  { unique: true, partialFilterExpression: { recurringKey: { $type: "string" } } }
 );
 
 export const Transaction = mongoose.model<ITransaction>(

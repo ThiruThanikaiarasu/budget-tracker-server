@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { validate } from "../middlewares/validate.js";
+import { recurringInput } from "../utils/recurring.js";
 import { authenticate } from "../middlewares/auth.js";
 import {
   getCategories,
@@ -14,12 +15,14 @@ const createSchema = z.object({
   name: z.string().min(1),
   type: z.enum(["income", "expense"]),
   icon: z.string().optional(),
+  recurring: recurringInput,
 });
 
 const updateSchema = z.object({
   name: z.string().min(1),
   type: z.enum(["income", "expense"]),
   icon: z.string().optional(),
+  recurring: recurringInput,
 });
 
 const reorderSchema = z.object({

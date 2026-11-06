@@ -5,6 +5,7 @@ import { User } from "../models/User.js";
 import { Transaction } from "../models/Transaction.js";
 import { CategoryItem } from "../models/CategoryItem.js";
 import { normalizeName } from "../utils/normalizeName.js";
+import { buildRecurring } from "../utils/recurring.js";
 
 /**
  * Name of a category the user can already see that collides with `name`
@@ -65,7 +66,19 @@ export async function createCategory(
     return;
   }
 
-  const category = await Category.create({ userId: req.userId, name, type, icon });
+  const recurring = await buildRecurring(req.userId!, req.body.recurring);
+  if ("error" in recurring) {
+    res.status(400).json({ success: false, message: recurring.error });
+    return;
+  }
+
+  const category = await Category.create({
+    userId: req.userId,
+    name,
+    type,
+    icon,
+    recurring: recurring.change === "set" ? recurring.value : undefined,
+  });
 
   await User.findByIdAndUpdate(req.userId, {
     $push: { categoryOrder: category._id },
@@ -98,6 +111,17 @@ export async function updateCategory(
     return;
   }
 
+  // A shared default category has no schedule of its own to keep.
+  const recurring = await buildRecurring(
+    req.userId!,
+    req.body.recurring,
+    category.userId === null ? null : category.recurring
+  );
+  if ("error" in recurring) {
+    res.status(400).json({ success: false, message: recurring.error });
+    return;
+  }
+
   // Default category: clone as user's own and hide the original
   if (category.userId === null) {
     const user = await User.findById(req.userId);
@@ -106,7 +130,13 @@ export async function updateCategory(
       return;
     }
 
-    const newCat = await Category.create({ userId: req.userId, name, type, icon });
+    const newCat = await Category.create({
+      userId: req.userId,
+      name,
+      type,
+      icon,
+      recurring: recurring.change === "set" ? recurring.value : undefined,
+    });
 
     const originalId = category._id as mongoose.Types.ObjectId;
 
@@ -145,6 +175,8 @@ export async function updateCategory(
   category.name = name;
   category.type = type;
   category.icon = icon;
+  if (recurring.change === "set") category.recurring = recurring.value;
+  else if (recurring.change === "clear") category.set("recurring", undefined);
   await category.save();
 
   res.status(200).json({ success: true, category });

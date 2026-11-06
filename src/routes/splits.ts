@@ -8,6 +8,7 @@ import {
   getSharedExpenses,
   getBalances,
   settleUp,
+  createTransfer,
   deleteSharedExpense,
 } from "../controllers/splitController.js";
 
@@ -42,6 +43,17 @@ const settleSchema = z
     { message: "accountId is required when money changes hands.", path: ["accountId"] }
   );
 
+const transferSchema = z.object({
+  friendId: z.string().min(1),
+  direction: z.enum(["sent", "received"]),
+  amount: z.number().positive(),
+  accountId: z.string().min(1),
+  date: dateString.optional(),
+  note: z.string().optional(),
+  // The earlier opposite-direction transfer this one pays back.
+  repaysTransferId: z.string().min(1).optional(),
+});
+
 const router = Router();
 
 router.use(authenticate);
@@ -50,6 +62,7 @@ router.post("/", validate(createSchema), createSharedExpense);
 router.get("/", getSharedExpenses);
 router.get("/balances", getBalances);
 router.post("/settle", validate(settleSchema), settleUp);
+router.post("/transfer", validate(transferSchema), createTransfer);
 router.delete("/:id", deleteSharedExpense);
 
 export default router;

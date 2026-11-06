@@ -1,10 +1,13 @@
 import mongoose, { Schema, Document } from "mongoose";
+import { recurringSubSchema, type IRecurring } from "../utils/recurring.js";
 
 export interface ICategory extends Document {
   userId: mongoose.Types.ObjectId | null;
   name: string;
   type: "income" | "expense";
   icon?: string;
+  // Set when this whole category repeats (e.g. Rent). See utils/recurring.ts.
+  recurring?: IRecurring;
   createdAt: Date;
 }
 
@@ -28,6 +31,10 @@ const categorySchema = new Schema<ICategory>({
   icon: {
     type: String,
     trim: true,
+  },
+  recurring: {
+    type: recurringSubSchema,
+    default: undefined,
   },
   createdAt: {
     type: Date,

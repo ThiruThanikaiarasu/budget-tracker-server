@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from "mongoose";
+import { recurringSubSchema, type IRecurring } from "../utils/recurring.js";
 
 /**
  * A sub-category under a Category — e.g. "Tomato" / "Potato" under Groceries.
@@ -28,6 +29,8 @@ export interface ICategoryItem extends Document {
   // Listed in the transaction form's item picker. Unticked items stay usable
   // via the picker's search. Missing on older docs = true.
   showInPicker: boolean;
+  // Set when this item repeats (e.g. Apple Music). See utils/recurring.ts.
+  recurring?: IRecurring;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -86,6 +89,10 @@ const categoryItemSchema = new Schema<ICategoryItem>(
     showInPicker: {
       type: Boolean,
       default: true,
+    },
+    recurring: {
+      type: recurringSubSchema,
+      default: undefined,
     },
   },
   { timestamps: true }
